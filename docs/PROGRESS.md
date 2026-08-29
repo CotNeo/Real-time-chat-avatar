@@ -165,3 +165,44 @@ carry no hardware/model-download risk:
   produce a voice-conversion engine to feed it).
 
 Next: continue to Milestone 3 (InsightFace face detection).
+
+---
+
+## Milestone 14 (started early) — Minimal running application
+
+Status: **PARTIAL** (by design — this is a thin vertical slice, not the full API)
+
+The user asked to "bring the application up" before face swap/voice conversion
+existed. Rather than fake a demo, stood up the smallest genuinely real slice:
+a FastAPI service (`services/api/main.py`) built only on already-verified
+components (Milestone 2's `ThreadedCameraStream`, the config loader), serving:
+
+- `GET /health` — reports real camera connection state and live FPS, plus an
+  explicit list of which milestones are/aren't implemented (so the endpoint
+  can't be mistaken for a finished product).
+- `GET /devices/video` — real `/dev/video*` enumeration.
+- `GET /preview/stream` — live MJPEG passthrough of the raw webcam feed.
+- `GET /` — a plain HTML page embedding the preview, viewable in a browser.
+
+Implemented:
+- Found port 8000 already bound by an unrelated process on this machine (`ss
+  -tln` confirmed); moved this project's default to 8100 and updated
+  `.env.example` with a note explaining why, rather than silently colliding.
+- Started the server, then verified it end-to-end rather than trusting the
+  "Application startup complete" log line: pulled a single JPEG out of the raw
+  multipart MJPEG stream and inspected it directly — it was a real, live frame
+  of the room/person in front of the camera, at the same ~15 FPS `/health`
+  reports (consistent with the Milestone 2 low-light finding, not a
+  regression). The verification frame was deleted immediately after — it's a
+  real photo of the user's face and has no reason to persist on disk (Section 21).
+
+Measured: `camera_fps: 15.0` via `/health`, matching Milestone 2's benchmark
+for this room's current lighting — consistent, not coincidental.
+
+Problems: none blocking. This is intentionally not Milestone 14 in full —
+no `/identity`, `/voices`, `/session/start|stop`, or `/metrics` endpoints yet,
+since those depend on Milestones 4, 8, and 5/9 respectively.
+
+Next: keep this server running as the base and build Milestone 3 (face
+detection) as a new endpoint/overlay on the same preview, rather than a
+separate throwaway script.
