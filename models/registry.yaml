@@ -22,8 +22,13 @@ face:
     note: same downloaded pack as face-detection, no second download
   face-swap:
     backend: onnx
-    path: models/face/models/inswapper/inswapper_128_fp16.onnx
-    source: https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128_fp16.onnx
+    path: models/face/models/inswapper/inswapper_128.onnx
+    source: https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx
+    precision_note: >
+      fp32 deliberately, NOT fp16. A/B tested on identical well-lit input on
+      this RTX 2060: the fp16 variant produced blurred/smeared/discolored
+      output while fp32 produced a clean sharp face. Do not "optimize" this
+      back to fp16 without re-running that comparison.
     license: >
       UNCLEAR. InsightFace discontinued official distribution/maintenance of
       this model (now directs users to their commercial product). This is a
@@ -32,8 +37,8 @@ face:
       avatar experimentation on the operator's own likeness (Section 21) —
       never redistributed. See docs/PROGRESS.md, Milestone 5, for the full
       provenance discussion and the user's explicit decision to proceed.
-    sha256: 32031dbe50398c1beffa9daadaec8dd7ae9529d8314a0307b45a4987497f8494
-    approx_disk_mb: 265
+    sha256: e4a3f08c753cb72d04e10aa0f7dbe3deebbf39567d4ead6dce08e98aa49e16af
+    approx_disk_mb: 529
 
 voice:
   # voice-female-01:

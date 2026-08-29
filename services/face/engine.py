@@ -30,6 +30,14 @@ class FaceFrameResult:
     landmarks: np.ndarray | None
     detection_ran_this_frame: bool  # False when a tracked/interpolated box was used
     timings_ms: dict[str, float]  # e.g. {"detect": 4.2, "inference": 18.1, "blend": 2.0}
+    # Set when a face WAS detected but transfer was intentionally skipped this
+    # frame — e.g. "face_partially_out_of_frame" (Milestone 5: a face whose
+    # bbox extends past the frame edge makes the alignment warp sample from
+    # outside the source image, producing a black void that corrupts the swap
+    # model's output — verified directly, not assumed, see docs/PROGRESS.md).
+    # None means either no skip happened, or face_detected is False for the
+    # ordinary "nothing there" reason.
+    skip_reason: str | None = None
 
 
 class FaceEngineError(RuntimeError):

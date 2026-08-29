@@ -95,6 +95,53 @@ def test_detection_interval_skips_redetection_on_subsequent_frames():
     assert detector.call_count == 2
 
 
+def test_face_extending_past_frame_edge_skips_swap_and_reports_reason():
+    """Regression test for the Milestone 5 corruption bug: a bbox that runs
+    past the frame edge makes the alignment warp sample outside the image,
+    which the swap model turns into a smeared, discolored face. The engine
+    must pass the original frame through untouched and say why."""
+    out_of_frame = DetectedFace(
+        bbox=(-32, 333, 161, 606), score=0.76,
+        landmarks=np.array([[20, 454], [112, 439], [77, 514], [49, 560], [113, 547]], dtype=np.float32),
+    )
+    detector = FakeDetector([out_of_frame])
+    engine = FaceSwapEngine(detector=detector)
+
+    class ExplodingSwapper:
+        def get(self, *args, **kwargs):
+            raise AssertionError("swap must not run on an out-of-frame face")
+
+    engine._swapper = ExplodingSwapper()
+    engine._source_embedding = np.ones(512, dtype=np.float32)
+
+    frame = np.full((720, 1280, 3), 60, dtype=np.uint8)
+    result = engine.process_frame(frame)
+
+    assert result.face_detected is True
+    assert result.skip_reason == "face_partially_out_of_frame"
+    assert np.array_equal(result.output_image, frame)
+
+
+def test_fully_in_frame_face_is_swapped_normally():
+    face = _make_face()  # bbox (10,10,100,100), well inside a 200x200 frame
+    detector = FakeDetector([face])
+    engine = FaceSwapEngine(detector=detector)
+
+    class MarkingSwapper:
+        def get(self, img, target_face, source_face, paste_back=True):
+            return np.full_like(img, 200)
+
+    engine._swapper = MarkingSwapper()
+    engine._source_embedding = np.ones(512, dtype=np.float32)
+
+    frame = np.zeros((200, 200, 3), dtype=np.uint8)
+    result = engine.process_frame(frame)
+
+    assert result.face_detected is True
+    assert result.skip_reason is None
+    assert result.output_image.mean() == 200  # swapper actually ran
+
+
 def test_reset_clears_tracking_state_forcing_redetection():
     face = _make_face()
     detector = FakeDetector([face])

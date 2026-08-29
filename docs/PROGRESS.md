@@ -491,3 +491,88 @@ Next: Milestone 6 (face model benchmarking — formalize the FPS/VRAM/quality
 comparison started here into `benchmarks/face-results.json` and
 `docs/FACE_MODEL_COMPARISON.md`), or Milestone 7 (microphone) if the user
 wants to switch tracks toward voice next.
+
+---
+
+## Milestone 5b — Swap quality was still bad; two more real root causes found
+
+Status: **DONE — the "low light" explanation above was incomplete and partly wrong**
+
+The user tested with proper white + yellow room lighting and reported results
+were still very bad, with screenshots showing a smeared, discolored face. That
+contradicted the tidy "it's just low light" conclusion recorded above, so it
+got re-investigated properly instead of being re-explained away. Two distinct,
+independent causes were found — both real bugs, both fixed:
+
+### Cause 1 (the big one): the fp16 model file is broken on this GPU
+
+Milestone 5 originally downloaded `inswapper_128_fp16.onnx` (277 MB) to save
+disk, reasoning that Turing has native FP16 tensor cores so it "should" be
+fine. That reasoning was never tested — it was an assumption.
+
+A/B tested it properly: same code path, same identity embedding, same
+well-lit 1024×1024 target image, only the weights file swapped. Dumped each
+model's raw 128×128 output before any blending, so nothing downstream could
+be blamed:
+
+| Variant | Raw 128×128 output |
+|---|---|
+| `inswapper_128_fp16.onnx` | blurred, smeared, discolored — visibly corrupted |
+| `inswapper_128.onnx` (fp32) | clean, sharp, correct skin tones |
+
+So the fp16 build isn't "slightly lower precision" here — it's unusable.
+Switched the default to fp32, updated `models/registry.yaml` /
+`scripts/models.py` (new sha256 `e4a3f08c…`, 529 MB), and **deleted the fp16
+file** so it can't be picked up by accident.
+
+Cost, measured rather than guessed: fp32 is **78.0 ms/frame vs 62.2 ms for
+fp16 (~25% slower)** plus ~277 MB more disk. Worth it — a fast unusable image
+is worth nothing. (An earlier draft of the code comment claimed "no meaningful
+speed difference"; that was written before measuring and has been corrected in
+place. Noted here because writing an unverified claim into a comment is
+exactly the failure mode this log exists to catch.)
+
+Live confirmation after the switch: pulled a real frame from the running
+`/preview/stream` — a coherent, natural, recognizable swapped face, clearly
+carrying the reference identity. The corruption is gone.
+
+### Cause 2: faces touching the frame edge corrupt the alignment warp
+
+Separately, staged diagnostics on live camera frames (dumping every
+intermediate: raw frame → aligned 128×128 crop → raw model output →
+final paste-back) revealed a second failure: when the detected bbox extends
+past the frame edge (measured a real one at `x1 = -32`), the ArcFace
+alignment warp samples from outside the source image and fills that region
+with black. The aligned crop had a visible black wedge; the model then
+"reconstructed" that void into a smeared mess. This is a genuine edge case,
+not a coding error in the warp — sitting too close to, or off to the side of,
+the webcam triggers it, which is exactly what the user's camera framing was
+doing.
+
+Fixed by detecting it in `FaceSwapEngine.process_frame()` and skipping the
+swap for that frame, passing the untouched real frame through and reporting
+`skip_reason="face_partially_out_of_frame"` via the new `FaceFrameResult.
+skip_reason` field. The live preview surfaces this as an on-screen
+**"MOVE BACK - face is cut off by the frame edge"** message, so the user gets
+an actionable instruction instead of a silently mangled image. Two regression
+tests cover it (the out-of-frame case must not call the swapper at all; the
+fully-in-frame case must).
+
+### What this changes about the earlier low-light conclusion
+
+The low-light finding recorded in Milestone 5 above is still real (this camera
+does lose frame rate and gain noise in the dark), but it was **not** the main
+cause of the bad output the user saw — the broken fp16 weights were. The
+low-light warning overlay stays (it's still useful and honest), but it should
+no longer be read as "this is why your swap looks wrong." Correcting the
+earlier conclusion rather than quietly leaving it in place, since a wrong
+diagnosis left in the log is worse than no diagnosis.
+
+Remaining known quality limits, now that the real bugs are fixed:
+- `inswapper_128` is inherently a 128×128 model. A face occupying, say,
+  400×500 px in a 720p frame is upscaled ~3-4×, so softness/seams are
+  expected and are a property of the model, not a defect to chase. Section 15's
+  optional face-enhancement stage (GFPGAN/CodeFormer-class) is the standard
+  remedy and remains deliberately unimplemented for now (Section 9: get it
+  working before optimizing).
+- Good, even lighting on the face still materially improves output.

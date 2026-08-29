@@ -42,8 +42,21 @@ from services.face.engine import FaceEngine, FaceEngineError, FaceFrameResult
 from shared.schemas.identity import IdentitySession
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# fp32, NOT fp16. Measured directly (docs/PROGRESS.md, Milestone 5): on this
+# RTX 2060, the fp16 variant of this model produces visibly degraded output —
+# blurred, smeared, discolored — on the exact same well-lit input where the
+# fp32 variant produces a clean, sharp face. Same code path, same identity
+# embedding, same target image, only the weights file differs. The fp16 build
+# is NOT simply "slightly lower precision" here; it is broken enough to be
+# unusable.
+#
+# fp32 does cost real speed — measured 78.0 ms/frame vs 62.2 ms for fp16
+# (~25% slower), plus ~277 MB more disk. That trade is still clearly correct:
+# a fast unusable image is worth nothing. If the pipeline later needs those
+# milliseconds back, the answer is a different model or TensorRT (Section 9),
+# NOT reverting to this broken fp16 file.
 DEFAULT_SWAP_MODEL_PATH = (
-    REPO_ROOT / "models" / "face" / "models" / "inswapper" / "inswapper_128_fp16.onnx"
+    REPO_ROOT / "models" / "face" / "models" / "inswapper" / "inswapper_128.onnx"
 )
 
 
@@ -167,6 +180,28 @@ class FaceSwapEngine(FaceEngine):
             )
 
         face = faces[0]  # largest/highest-confidence face only — single-user product
+
+        # A face whose bounding box extends past the frame edge cannot be
+        # aligned correctly: the 128x128 ArcFace warp samples from outside the
+        # source image and fills that region with black, which the swap model
+        # then "reconstructs" into a smeared, discolored mess. Verified
+        # directly by dumping the intermediate aligned crop (a visible black
+        # wedge) and the model's raw 128x128 output (incoherent) for a frame
+        # with bbox x1 = -32. Skipping the swap and passing the real frame
+        # through is strictly better than emitting a corrupted face, and the
+        # caller gets `skip_reason` so the UI can tell the user to move back
+        # into frame rather than leaving them guessing.
+        if _is_out_of_frame(face.bbox, frame.shape):
+            return FaceFrameResult(
+                output_image=frame,
+                face_detected=True,
+                bbox=face.bbox,
+                landmarks=face.landmarks,
+                detection_ran_this_frame=detection_ran,
+                timings_ms=timings,
+                skip_reason="face_partially_out_of_frame",
+            )
+
         infer_start = time.perf_counter()
         target_face = SimpleNamespace(kps=face.landmarks)
         source_face = SimpleNamespace(normed_embedding=self._source_embedding)
@@ -181,6 +216,16 @@ class FaceSwapEngine(FaceEngine):
             detection_ran_this_frame=detection_ran,
             timings_ms=timings,
         )
+
+
+def _is_out_of_frame(
+    bbox: tuple[int, int, int, int], frame_shape: tuple[int, ...], margin: int = 0
+) -> bool:
+    """True when the detected face box extends past the frame edge — see the
+    call site in process_frame() for why this must skip the swap."""
+    x1, y1, x2, y2 = bbox
+    height, width = frame_shape[:2]
+    return x1 < margin or y1 < margin or x2 > (width - margin) or y2 > (height - margin)
 
 
 def _dummy_landmarks() -> np.ndarray:

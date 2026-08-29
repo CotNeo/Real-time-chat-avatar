@@ -34,11 +34,14 @@ CATALOG = {
         "installer": "_install_insightface_buffalo_l",
     },
     "face-swap": {
-        "description": "inswapper_128 (fp16) — Mode A real-time face swap "
+        "description": "inswapper_128 (fp32) — Mode A real-time face swap "
         "(Milestone 5). Inputs/outputs are 128x128; source identity is the "
         "512-d ArcFace embedding this project's own Milestone 4 identity "
-        "pipeline already produces.",
-        "source": "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128_fp16.onnx "
+        "pipeline already produces. NOTE: fp32 deliberately, not fp16 — the "
+        "fp16 variant was measured producing visibly corrupted (blurred/"
+        "discolored) output on this GPU where fp32 is clean; see "
+        "docs/PROGRESS.md, Milestone 5.",
+        "source": "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx "
         "(community mirror — see LICENSE NOTE below)",
         "license": "UNCLEAR — LICENSE NOTE: InsightFace's own team has "
         "discontinued official maintenance/distribution of this model and "
@@ -51,8 +54,8 @@ CATALOG = {
         "strictly local, single-user, consensual avatar experimentation on "
         "the operator's own likeness (Section 21) — never redistributed. "
         "Re-evaluate if this project's scope ever changes.",
-        "approx_disk_mb": 265,
-        "sha256": "32031dbe50398c1beffa9daadaec8dd7ae9529d8314a0307b45a4987497f8494",
+        "approx_disk_mb": 529,
+        "sha256": "e4a3f08c753cb72d04e10aa0f7dbe3deebbf39567d4ead6dce08e98aa49e16af",
         "installer": "_install_inswapper",
     },
 }
@@ -81,7 +84,7 @@ def _install_inswapper() -> None:
 
     target_dir = MODELS_DIR / "face" / "models" / "inswapper"
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / "inswapper_128_fp16.onnx"
+    target_path = target_dir / "inswapper_128.onnx"
     url = CATALOG["face-swap"]["source"].split(" ")[0]
     print(f"Downloading {url} -> {target_path} ...")
     urllib.request.urlretrieve(url, target_path)
@@ -101,7 +104,7 @@ def _install_inswapper() -> None:
 _INSTALLED_CHECKS = {
     "face-detection": lambda: (MODELS_DIR / "face" / "models" / "buffalo_l").exists(),
     "face-swap": lambda: (
-        MODELS_DIR / "face" / "models" / "inswapper" / "inswapper_128_fp16.onnx"
+        MODELS_DIR / "face" / "models" / "inswapper" / "inswapper_128.onnx"
     ).exists(),
 }
 

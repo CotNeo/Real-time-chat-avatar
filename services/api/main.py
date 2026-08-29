@@ -301,6 +301,11 @@ def _mjpeg_generator():
             image = result.output_image.copy()
             label = f"SWAP ACTIVE  faces: {1 if result.face_detected else 0}  FPS: {_camera_stream.fps:.1f}"
             cv2.putText(image, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+            if result.skip_reason == "face_partially_out_of_frame":
+                cv2.putText(
+                    image, "MOVE BACK - face is cut off by the frame edge",
+                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 100, 255), 2,
+                )
         elif _detector is not None:
             faces, detect_ms = _detector.detect(image)
             _last_detect_ms = detect_ms
