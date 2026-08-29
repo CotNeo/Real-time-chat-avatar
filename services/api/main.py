@@ -20,6 +20,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from services.face.detector import FaceDetector, FaceDetectorError
+from services.face.engine import FaceEngineError
 from services.face.identity import (
     MAX_REFERENCE_IMAGES,
     IdentityEncoder,
@@ -27,10 +28,20 @@ from services.face.identity import (
     build_identity_session,
 )
 from services.face.overlay import draw_detection_overlay
+from services.face.swapper import FaceSwapEngine
 from shared.logging.logger import configure_logging, get_logger
 from shared.schemas.config import load_config
 from shared.schemas.identity import IdentitySession
 from shared.utils.camera import CameraConfig, CameraError, ThreadedCameraStream
+
+# Below this mean-brightness value (0-255), Milestone 5 testing showed the
+# swap model's output visibly degrades into incoherent noise — not a code bug,
+# reproduced and isolated: the exact same code produces a coherent (if
+# soft-edged) swapped face on a well-lit image, and gamma-correcting a dark
+# frame does NOT recover quality because the underlying problem is sensor
+# noise, not just low brightness (see docs/PROGRESS.md, Milestone 5). This
+# threshold is an honest signal to the user, not a hard block.
+LOW_LIGHT_WARNING_THRESHOLD = 70.0
 
 config = load_config()
 configure_logging(level=config.runtime.log_level, fmt="console")
@@ -41,13 +52,15 @@ app = FastAPI(title="Real-Time AI Avatar — control API", version="0.0.1-milest
 _camera_stream: ThreadedCameraStream | None = None
 _detector: FaceDetector | None = None
 _encoder: IdentityEncoder | None = None
+_swap_engine: FaceSwapEngine | None = None
 _last_detect_ms: float = 0.0
 _identity_session: IdentitySession | None = None
+_session_active: bool = False
 
 
 @app.on_event("startup")
 def _startup() -> None:
-    global _camera_stream, _detector, _encoder
+    global _camera_stream, _detector, _encoder, _swap_engine
     cam_config = CameraConfig(
         device_index=config.video.device_index,
         width=config.video.width,
@@ -86,6 +99,20 @@ def _startup() -> None:
         _encoder = None
         log.error("identity_encoder_load_failed", error=str(e))
 
+    if _detector is not None:
+        try:
+            swap_engine = FaceSwapEngine(detector=_detector)
+            swap_engine.load()
+            swap_engine.warm_up()
+            _swap_engine = swap_engine
+            log.info("face_swap_engine_loaded", providers=swap_engine.actual_providers)
+        except FaceEngineError as e:
+            _swap_engine = None
+            log.error("face_swap_engine_load_failed", error=str(e))
+    else:
+        _swap_engine = None
+        log.error("face_swap_engine_skipped", reason="detector not loaded")
+
 
 @app.on_event("shutdown")
 def _shutdown() -> None:
@@ -106,6 +133,9 @@ def health() -> dict:
         "identity_encoder_loaded": _encoder is not None,
         "identity_session_active": _identity_session is not None
         and _identity_session.is_usable,
+        "face_swap_engine_loaded": _swap_engine is not None,
+        "face_swap_engine_providers": _swap_engine.actual_providers if _swap_engine else None,
+        "session_active": _session_active,
         "config": {
             "video": config.video.model_dump(),
             "runtime": config.runtime.model_dump(),
@@ -116,10 +146,10 @@ def health() -> dict:
             "2: camera capture engine",
             "3: face detection (SCRFD, live overlay in /preview/stream)",
             "4: reference identity (POST/GET/DELETE /identity)",
+            "5: real-time face transfer (inswapper_128, POST/POST /session/start|stop)",
             "12 (partial): PipeWire virtual microphone (device created, not yet fed real converted audio)",
         ],
         "milestones_not_yet_implemented": [
-            "5: real-time face transfer",
             "7-9: microphone / voice conversion",
             "11: virtual camera (needs one manual sudo step — see README section 9)",
         ],
@@ -206,11 +236,47 @@ def get_identity() -> dict:
 
 @app.delete("/identity")
 def delete_identity() -> dict:
-    global _identity_session
+    global _identity_session, _session_active
     had_session = _identity_session is not None
     _identity_session = None
+    if _session_active:
+        _session_active = False
+        if _swap_engine is not None:
+            _swap_engine.reset()
+        log.info("session_auto_stopped", reason="identity_cleared")
     log.info("identity_session_cleared", had_session=had_session)
     return {"cleared": had_session}
+
+
+@app.post("/session/start")
+def start_session() -> dict:
+    global _session_active
+    if _swap_engine is None:
+        raise HTTPException(
+            503,
+            "Face swap engine is not loaded — run `python scripts/models.py "
+            "install face-swap` and restart the API.",
+        )
+    if _identity_session is None or not _identity_session.is_usable:
+        raise HTTPException(
+            400,
+            "No usable identity session — upload at least one valid reference "
+            "photo via POST /identity before starting a session.",
+        )
+    _swap_engine.load_identity(_identity_session)
+    _session_active = True
+    log.info("session_started", session_id=_identity_session.session_id)
+    return {"session_active": True}
+
+
+@app.post("/session/stop")
+def stop_session() -> dict:
+    global _session_active
+    _session_active = False
+    if _swap_engine is not None:
+        _swap_engine.reset()
+    log.info("session_stopped")
+    return {"session_active": False}
 
 
 def _mjpeg_generator():
@@ -227,10 +293,24 @@ def _mjpeg_generator():
             continue
 
         image = frame.image
-        if _detector is not None:
+        brightness = float(np.mean(image))
+
+        if _session_active and _swap_engine is not None:
+            result = _swap_engine.process_frame(image)
+            _last_detect_ms = result.timings_ms.get("detect", 0.0)
+            image = result.output_image.copy()
+            label = f"SWAP ACTIVE  faces: {1 if result.face_detected else 0}  FPS: {_camera_stream.fps:.1f}"
+            cv2.putText(image, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+        elif _detector is not None:
             faces, detect_ms = _detector.detect(image)
             _last_detect_ms = detect_ms
             image = draw_detection_overlay(image.copy(), faces, _camera_stream.fps, detect_ms)
+
+        if brightness < LOW_LIGHT_WARNING_THRESHOLD:
+            cv2.putText(
+                image, f"LOW LIGHT (brightness {brightness:.0f}/255) - quality will degrade",
+                (10, image.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2,
+            )
 
         ok, jpeg = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if not ok:
@@ -284,13 +364,16 @@ def index() -> str:
     </style>
     </head>
     <body>
-      <h2>Real-Time AI Avatar — dev preview (Milestones 2-4/14 slice)</h2>
-      <img src="/preview/stream" alt="live camera preview with face detection overlay" />
+      <h2>Real-Time AI Avatar — dev preview (Milestones 2-5/14 slice)</h2>
+      <img src="/preview/stream" alt="live camera preview" />
       <p class="note">
-        Live SCRFD face detection (bounding box, 5-point landmarks, confidence,
-        FPS) drawn on the raw webcam feed — still no face swap or voice
-        conversion yet (see <code>/health</code> for exactly which milestones
-        are done).
+        Face detection overlay by default. Upload a reference identity below
+        and click "Start session" to switch the preview to live face swap
+        instead. Still no voice conversion or virtual devices yet (see
+        <code>/health</code> for exactly which milestones are done). A
+        low-light warning appears on the preview itself when the frame is too
+        dark for reliable results — this is a measured hardware limitation
+        (see docs/PROGRESS.md, Milestone 5), not a bug.
       </p>
 
       <div class="panel">
@@ -302,6 +385,13 @@ def index() -> str:
         <button id="refUpload">Upload</button>
         <button id="refClear">Clear session</button>
         <pre id="refResult">No identity session yet.</pre>
+      </div>
+
+      <div class="panel">
+        <h3>Face swap session (Milestone 5)</h3>
+        <button id="sessionStart">Start session</button>
+        <button id="sessionStop">Stop session</button>
+        <pre id="sessionResult">Session not started.</pre>
       </div>
 
       <script>
@@ -321,6 +411,16 @@ def index() -> str:
         document.getElementById('refClear').onclick = async () => {
           await fetch('/identity', { method: 'DELETE' });
           await refreshIdentity();
+        };
+        document.getElementById('sessionStart').onclick = async () => {
+          const r = await fetch('/session/start', { method: 'POST' });
+          const data = await r.json();
+          document.getElementById('sessionResult').textContent =
+            r.ok ? JSON.stringify(data, null, 2) : `Error: ${data.detail}`;
+        };
+        document.getElementById('sessionStop').onclick = async () => {
+          const r = await fetch('/session/stop', { method: 'POST' });
+          document.getElementById('sessionResult').textContent = JSON.stringify(await r.json(), null, 2);
         };
         refreshIdentity();
       </script>

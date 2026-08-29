@@ -1,0 +1,19 @@
+{
+  "swap_model_providers": [
+    "CUDAExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "reference_images_accepted": 5,
+  "duration_s": 8.03,
+  "frames_total": 116,
+  "frames_with_face": 116,
+  "achieved_fps": 14.45,
+  "detect_ms": {
+    "mean": 4.21,
+    "p95": 13.23
+  },
+  "inference_ms": {
+    "mean": 53.75,
+    "p95": 57.46
+  }
+}

@@ -33,6 +33,28 @@ CATALOG = {
         "approx_disk_mb": 326,
         "installer": "_install_insightface_buffalo_l",
     },
+    "face-swap": {
+        "description": "inswapper_128 (fp16) — Mode A real-time face swap "
+        "(Milestone 5). Inputs/outputs are 128x128; source identity is the "
+        "512-d ArcFace embedding this project's own Milestone 4 identity "
+        "pipeline already produces.",
+        "source": "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128_fp16.onnx "
+        "(community mirror — see LICENSE NOTE below)",
+        "license": "UNCLEAR — LICENSE NOTE: InsightFace's own team has "
+        "discontinued official maintenance/distribution of this model and "
+        "now directs users to their commercial product instead; there is no "
+        "clean official license file the way buffalo_l has one. This "
+        "download is from Gourieff/ReActor on Hugging Face, a long-standing "
+        "(2+ years), widely-used community mirror (the same one the "
+        "ReActor/roop/FaceFusion ecosystem builds on), not an "
+        "authoritative source. Approved for use in this project only for "
+        "strictly local, single-user, consensual avatar experimentation on "
+        "the operator's own likeness (Section 21) — never redistributed. "
+        "Re-evaluate if this project's scope ever changes.",
+        "approx_disk_mb": 265,
+        "sha256": "32031dbe50398c1beffa9daadaec8dd7ae9529d8314a0307b45a4987497f8494",
+        "installer": "_install_inswapper",
+    },
 }
 
 
@@ -53,9 +75,40 @@ def _install_insightface_buffalo_l() -> None:
     print("Done.")
 
 
+def _install_inswapper() -> None:
+    import hashlib
+    import urllib.request
+
+    target_dir = MODELS_DIR / "face" / "models" / "inswapper"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / "inswapper_128_fp16.onnx"
+    url = CATALOG["face-swap"]["source"].split(" ")[0]
+    print(f"Downloading {url} -> {target_path} ...")
+    urllib.request.urlretrieve(url, target_path)
+
+    expected_sha256 = CATALOG["face-swap"]["sha256"]
+    actual_sha256 = hashlib.sha256(target_path.read_bytes()).hexdigest()
+    if actual_sha256 != expected_sha256:
+        target_path.unlink()
+        raise RuntimeError(
+            f"Checksum mismatch! Expected {expected_sha256}, got {actual_sha256}. "
+            "Deleted the downloaded file — do not trust it."
+        )
+    print(f"Checksum verified: {actual_sha256}")
+    print("Done.")
+
+
+_INSTALLED_CHECKS = {
+    "face-detection": lambda: (MODELS_DIR / "face" / "models" / "buffalo_l").exists(),
+    "face-swap": lambda: (
+        MODELS_DIR / "face" / "models" / "inswapper" / "inswapper_128_fp16.onnx"
+    ).exists(),
+}
+
+
 def cmd_list() -> None:
     for key, spec in CATALOG.items():
-        installed = (MODELS_DIR / "face" / "models" / "buffalo_l").exists() if key == "face-detection" else False
+        installed = _INSTALLED_CHECKS.get(key, lambda: False)()
         status = "installed" if installed else "not installed"
         print(f"{key} [{status}]")
         print(f"  {spec['description']}")

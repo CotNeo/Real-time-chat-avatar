@@ -361,3 +361,133 @@ before you know it's needed."
 Next: Milestone 5 (real-time face transfer, Mode A) — this is the first
 milestone that actually changes what the live preview looks like, using the
 `aggregated_embedding` this milestone now produces.
+
+---
+
+## Milestone 5 — Real-Time Face Transfer (Mode A)
+
+Status: **DONE**, with an important, honestly-documented quality limitation
+tied to this room's lighting, not to the code.
+
+### Model choice and a licensing decision handed to the user
+
+The standard lightweight real-time face-swap model is `inswapper_128` — the
+same one roop/ReActor/FaceFusion all build on, and the correct choice per
+Section 4 (prioritize speed/stability over perfect quality; don't start with
+diffusion). Unlike `buffalo_l`, this model does **not** have a clean official
+source: InsightFace discontinued maintaining/distributing it and now points
+users at their commercial product instead. This is a genuine provenance/
+licensing ambiguity, not a technical decision, so it was put to the user
+directly rather than decided silently — they chose to proceed using a
+reputable, long-standing community mirror. Downloaded the fp16 variant
+(265 MB, half the fp32 size — a free win for this project's tight disk
+budget) from `Gourieff/ReActor` on Hugging Face (2+ years old, HF-scanned
+"Safe", the same source the ReActor/roop/FaceFusion ecosystem uses).
+Documented exactly this way, including the sha256, in `models/registry.yaml`
+and `scripts/models.py` (`install face-swap` now verifies the checksum and
+deletes the file if it doesn't match). Approved for **strictly local,
+single-user, consensual avatar experimentation on the operator's own
+likeness only** (Section 21) — not for redistribution.
+
+Before trusting it: `onnx.checker.check_model()` reported a topological-sort
+validation error. Rather than assume corruption, verified it's the model
+architecture's own well-known quirk (documented across the community) by
+loading it with `onnxruntime.InferenceSession` directly — it loaded fine on
+CUDA and its input/output shapes (`target`: [1,3,128,128], `source`: [1,512],
+`output`: [1,3,128,128]) exactly match the documented `inswapper_128`
+interface, confirming this is the genuine model, not tampered.
+
+### Implementation
+
+- `services/face/swapper.py`: `FaceSwapEngine` implements the `FaceEngine`
+  interface (Milestone 0's abstract class actually gets a real implementation
+  now). Shares the already-loaded `FaceDetector` instance rather than loading
+  SCRFD a second time. Deliberately reuses InsightFace's own
+  `model_zoo.inswapper.INSwapper.get()` for preprocessing/postprocessing/
+  blending rather than reimplementing the soft-edged mask/seam-blur/inverse-
+  affine paste-back logic from scratch — that logic is delicate and already
+  battle-tested across every major face-swap tool; reinventing it would add
+  risk with no upside (Section 3's "smallest practical combination" cuts both
+  ways). Implements Section 6's detection-interval tracking (full detect every
+  Nth frame, reuse the box in between) — verified by unit test with a
+  call-counting fake detector, not just by reading the code.
+- Wired into `services/api/main.py`: `POST /session/start` (requires a usable
+  identity session; loads it into the swap engine) and `POST /session/stop`.
+  `/preview/stream` now runs live face swap instead of the plain detection
+  overlay while a session is active, with a "SWAP ACTIVE" label; falls back to
+  Milestone 3's detection-only view otherwise — layered on top of, not
+  replacing, prior milestones.
+- `scripts/benchmark/benchmark_face_swap.py`: real camera + real reference
+  images + real model, writes `benchmarks/face-swap-results.json` and a
+  before/after JPEG pair.
+- `tests/test_face_swapper.py`: 6 unit tests against a fake detector/swapper
+  (no GPU/model needed) — error paths, the no-face passthrough, and the
+  detection-interval skip logic actually skipping (asserted via call count,
+  not assumed).
+
+### A real bug found and fixed: NaN from the engine's own warm-up call
+
+`warm_up()` used an all-zeros dummy identity embedding. Projected through the
+model's internal `emap` matrix, zero stays zero; the model's own code then
+does `latent /= np.linalg.norm(latent)`, i.e. `0/0`, raising `RuntimeWarning:
+invalid value encountered in divide` and producing a NaN-filled throwaway
+result. Root-caused properly rather than silenced: isolated whether the *real*
+per-frame pipeline was affected by disabling `warm_up()` and running 20 live
+frames with warnings promoted to errors — zero warnings, zero NaN frames,
+proving live processing was never affected, only the discarded warm-up call
+was. Fixed by using a normalized non-zero dummy vector instead. This kind of
+targeted isolation (comment out the suspect call, re-measure, don't guess)
+directly follows Section 30's process.
+
+### Measured (RTX 2060, real webcam, real reference identity — 5 accepted
+### synthetic reference photos from Milestone 4's test set)
+
+```
+swap_model_providers: CUDAExecutionProvider (confirmed, not CPU fallback)
+achieved_fps: 14.4-14.6 (camera-limited, same ~15 FPS ceiling as Milestones 2-3)
+detect_ms: mean 4.2, p95 13.7  (tracking interval keeps this cheap)
+inference_ms (swap model itself): mean 53.8-55.5, p95 ~58
+Combined VRAM with detector + recognition + swap ALL loaded simultaneously: 1941 MiB / 6144 MiB
+```
+
+At ~54ms/inference, the swap model alone could sustain ~18-19 FPS standalone
+— still short of the 30 FPS target even before the camera's own ceiling is
+considered, and the first sign that GPU inference time (not just the camera)
+will eventually need attention if lighting is ever fixed (Section 9: optimize
+*after* functionality works, which is exactly the point reached now).
+Combined VRAM usage (1.9 GB, including the ~420 MB desktop baseline) sits
+comfortably inside the ~2-3 GB face-engine budget Section 9 anticipated —
+plenty of headroom left on this 6 GB card for the voice engine later.
+
+### Critical, honestly-documented finding: low light breaks output quality, not just FPS
+
+Milestone 2 already established this camera's FPS drops in low light. This
+milestone found something more important: **in this room's current ambient
+light (~40/255 mean brightness), the swap model's output degrades into
+visible noise/artifacts — not just "lower quality," but incoherent.** This was
+isolated carefully, not assumed:
+
+1. The exact same code, given a well-lit reference photo as input, produces a
+   coherent (if visibly seamed — a known `inswapper_128` limitation) swapped
+   face. This proves the pipeline logic itself is correct.
+2. The live camera frame at ~40/255 brightness produces clearly incoherent,
+   noisy output.
+3. **Gamma-correcting the dark frame before feeding it to the model does NOT
+   fix this** — brightness went from 41→106/255 and the output was still
+   noise. This rules out "just too dark" as the explanation; the real cause is
+   sensor noise at this camera's actual low-light gain/exposure, which a tone
+   curve remap can't remove (it amplifies noise right along with signal).
+
+Given this, the live preview now computes per-frame brightness and overlays
+an honest `LOW LIGHT (brightness NN/255) - quality will degrade` warning
+(threshold 70/255, chosen from the measured 41-vs-89 comparison above) instead
+of silently producing garbage the user might mistake for a bug. Fixing this
+properly (denoising, or requiring/detecting better lighting) is deliberately
+NOT attempted now — Section 31: don't build for a problem before confirming
+it matters under the user's actual conditions, which may well include normal
+room lighting unlike this test environment.
+
+Next: Milestone 6 (face model benchmarking — formalize the FPS/VRAM/quality
+comparison started here into `benchmarks/face-results.json` and
+`docs/FACE_MODEL_COMPARISON.md`), or Milestone 7 (microphone) if the user
+wants to switch tracks toward voice next.

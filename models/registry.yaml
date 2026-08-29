@@ -8,13 +8,32 @@
 # see docs/PROGRESS.md for what's actually been benchmarked so far.
 
 face:
-  # face-default:
-  #   backend: onnx
-  #   path: models/face/<model>.onnx
-  #   source: <URL>
-  #   license: <license name>
-  #   vram_mb: <measured>
-  #   sha256: <checksum>
+  face-detection:
+    backend: onnx
+    path: models/face/models/buffalo_l/det_10g.onnx
+    source: https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
+    license: Non-commercial research purposes only (InsightFace project license)
+    vram_mb: measured as part of the combined face pipeline — see docs/PROGRESS.md
+  face-recognition:
+    backend: onnx
+    path: models/face/models/buffalo_l/w600k_r50.onnx
+    source: https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
+    license: Non-commercial research purposes only (InsightFace project license)
+    note: same downloaded pack as face-detection, no second download
+  face-swap:
+    backend: onnx
+    path: models/face/models/inswapper/inswapper_128_fp16.onnx
+    source: https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128_fp16.onnx
+    license: >
+      UNCLEAR. InsightFace discontinued official distribution/maintenance of
+      this model (now directs users to their commercial product). This is a
+      community mirror (Gourieff/ReActor on Hugging Face), not an
+      authoritative source. Used here only for local, single-user, consensual
+      avatar experimentation on the operator's own likeness (Section 21) —
+      never redistributed. See docs/PROGRESS.md, Milestone 5, for the full
+      provenance discussion and the user's explicit decision to proceed.
+    sha256: 32031dbe50398c1beffa9daadaec8dd7ae9529d8314a0307b45a4987497f8494
+    approx_disk_mb: 265
 
 voice:
   # voice-female-01:
