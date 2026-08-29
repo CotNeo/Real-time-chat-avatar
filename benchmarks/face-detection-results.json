@@ -1,0 +1,18 @@
+{
+  "providers": [
+    "CUDAExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "duration_s": 6.05,
+  "frames_total": 87,
+  "frames_with_face": 0,
+  "detection_rate": 0.0,
+  "max_faces_seen_in_one_frame": 0,
+  "camera_fps": 15.03,
+  "detect_latency_ms": {
+    "mean": 18.02,
+    "p50": 15.69,
+    "p95": 17.63,
+    "max": 220.4
+  }
+}

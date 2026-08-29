@@ -11,13 +11,14 @@ apps/web/.next/
 apps/web/out/
 
 # Models — never commit weights (Section 16/23); download via scripts/models.py
-models/face/*.onnx
-models/face/*.pth
-models/voice/**/*.pth
-models/voice/**/*.onnx
-models/voice/**/*.bin
-models/voice/**/*.safetensors
+# (matches nested pack directories too, e.g. models/face/models/buffalo_l/*.onnx
+# — confirmed this actually happens: insightface's download layout nests one
+# level deeper than a flat models/face/*.onnx pattern would catch)
+models/face/**
+models/voice/**
 !models/registry.yaml
+!models/face/.gitkeep
+!models/voice/.gitkeep
 
 # Reference images / session data — Section 5/21: never retained beyond a session
 data/sessions/

@@ -1,6 +1,17 @@
 # Milestones 3-6: face detection / identity / swap / reenactment.
-# Installed separately from requirements/voice.txt so iterating on the voice
-# engine never forces re-resolving/reinstalling the (heavier) face stack.
+#
+# DO NOT `pip install -r requirements/face.txt` directly — insightface
+# declares plain `onnxruntime` and `opencv-python` as dependencies, and both
+# silently overwrite this project's `onnxruntime-gpu` / `opencv-python-headless`
+# on disk (same import path, last install wins, no error). Confirmed while
+# building Milestone 3 — CUDA support and the headless cv2 build both broke
+# silently this way. Use the script instead, which installs insightface with
+# --no-deps and adds only its non-conflicting dependencies:
+#
+#   ./scripts/setup/install_face_deps.sh
+#
+# This file is kept for reference/documentation of what's actually needed,
+# not as something to feed straight to pip.
 -r base.txt
 insightface
 scikit-image

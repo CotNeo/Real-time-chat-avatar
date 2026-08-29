@@ -206,3 +206,93 @@ since those depend on Milestones 4, 8, and 5/9 respectively.
 Next: keep this server running as the base and build Milestone 3 (face
 detection) as a new endpoint/overlay on the same preview, rather than a
 separate throwaway script.
+
+---
+
+## Milestone 3 — Face Detection
+
+Status: **DONE** (pipeline verified; live "detects an actual face" confirmation
+pending — see below)
+
+Implemented:
+- `scripts/models.py`: explicit, documented model installer (Section 23) —
+  `python scripts/models.py install face-detection` downloads InsightFace's
+  official `buffalo_l` pack (~326 MB) from its real GitHub Releases URL, prints
+  source + license (**non-commercial research only** — confirmed against the
+  InsightFace project's own README, fits this project exactly) before
+  fetching, never auto-downloads silently at runtime.
+- `services/face/detector.py`: `FaceDetector` wrapping SCRFD (loads only the
+  detection ONNX file, not the full `FaceAnalysis` app with recognition/
+  landmark/age/gender models it doesn't need yet — Section 3's "smallest
+  practical combination"). Explicitly verifies the ONNX session actually ended
+  up on `CUDAExecutionProvider` and raises a descriptive error otherwise,
+  rather than trusting the request.
+- `services/face/overlay.py`: shared bbox/landmark/confidence/FPS drawing,
+  used by both the benchmark script and the live API so there's one
+  implementation.
+- `scripts/benchmark/benchmark_face_detection.py`: real camera + real model,
+  writes `benchmarks/face-detection-results.json`.
+- Wired live into `services/api/main.py`'s `/preview/stream` — the running
+  app now draws the detection overlay on every frame, and `/health` reports
+  `face_detector_loaded`, `face_detector_providers`, `last_detect_ms`.
+
+Measured (RTX 2060, real webcam, CUDA confirmed via `actual_providers`):
+```
+detect_latency_ms: mean 18.0, p50 15.7-15.8, p95 17.4-17.6, max ~220-320 (outlier, likely GC/first-call)
+camera_fps: 15.0 (matches Milestone 2's low-light finding — consistent)
+```
+At ~16 ms/frame, detection alone could sustain >60 FPS — the camera's own
+~15 FPS ceiling (Milestone 2, ambient light) is the binding constraint, not
+GPU inference. This is exactly the situation Section 6 anticipated: measure
+the real ceiling, don't assume 30 is available.
+
+**Two more real bugs found and fixed** (not left as TODOs):
+
+1. **`insightface` silently broke CUDA and the headless OpenCV build.**
+   `insightface` declares plain `onnxruntime` and `opencv-python` (GUI build)
+   as dependencies. Both share an import path with this project's
+   `onnxruntime-gpu` / `opencv-python-headless` — whichever installs *last*
+   silently overwrites the other's files on disk, no error, no warning beyond
+   an easy-to-miss pip line. Confirmed directly: after a plain
+   `pip install insightface`, `onnxruntime.get_available_providers()` had
+   dropped CUDA entirely and `cv2.getBuildInformation()` showed a QT5 GUI
+   build had replaced the headless one. Fixed with
+   `scripts/setup/install_face_deps.sh`, which installs insightface with
+   `--no-deps` and adds only its real, non-conflicting dependencies —
+   documented in `requirements/face.txt` with an explicit warning not to
+   `pip install -r` it directly.
+
+2. **`onnxruntime-gpu`'s CUDA provider needs libraries it doesn't bundle.**
+   Running the face-detection benchmark standalone (no `torch` import in that
+   process) failed with `libcublasLt.so.13: cannot open shared object file`,
+   caught correctly by `FaceDetector.load()`'s own provider check rather than
+   silently falling back to CPU — proving that check earns its place. Root
+   cause: there's no system-wide CUDA Toolkit on this machine (see
+   `docs/ENVIRONMENT_REPORT.md`); `onnxruntime-gpu` dlopen()s cuBLAS/cuDNN
+   `.so` files that, here, only exist inside `torch`'s own `nvidia-*` pip
+   dependencies. Milestone 1's `verify_cuda.py` never hit this because it
+   imports `torch` first, which loads those libraries via its own baked-in
+   RPATH as a side effect. **First fix attempt was wrong and is documented as
+   such in `shared/utils/cuda_env.py`**: mutating
+   `os.environ["LD_LIBRARY_PATH"]` after the process had already started did
+   *not* work, verified directly — `get_available_providers()` still listed
+   CUDA and the env var was set correctly, but session creation still fell
+   back to CPU with the identical error, because glibc's dynamic linker
+   doesn't re-read that variable for dlopen() once a process is running. The
+   fix that actually works, verified directly: explicitly `import torch`
+   before touching onnxruntime's CUDA provider (`ensure_onnxruntime_cuda_libs()`
+   in `shared/utils/cuda_env.py`, called from `FaceDetector.load()`).
+
+Not yet confirmed: an actual live face being detected. The room was empty for
+every benchmark run in this session (checked directly by capturing and
+inspecting a raw frame before concluding "0 faces" was correct behavior, not a
+bug) — 0 false positives across ~200 combined frames of an empty room is
+itself a meaningful correctness signal, but "stable live detection" of a real
+face per Section 3's success criterion needs someone actually in front of the
+camera. The live overlay is wired into `/preview/stream` right now specifically
+so this can be confirmed by looking in the browser rather than by the agent
+repeatedly capturing/inspecting frames of a person's face for its own sake.
+
+Next: Milestone 4 (reference identity — upload, validate, align, embed 1-5
+images), which can reuse this same downloaded `buffalo_l` pack's recognition
+model.
