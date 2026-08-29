@@ -1,0 +1,5 @@
+# Testing/dev tooling only, never needed at runtime.
+pytest
+pytest-asyncio
+httpx
+ruff

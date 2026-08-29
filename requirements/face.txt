@@ -1,0 +1,6 @@
+# Milestones 3-6: face detection / identity / swap / reenactment.
+# Installed separately from requirements/voice.txt so iterating on the voice
+# engine never forces re-resolving/reinstalling the (heavier) face stack.
+-r base.txt
+insightface
+scikit-image

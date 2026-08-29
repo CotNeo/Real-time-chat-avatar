@@ -1,0 +1,14 @@
+# Core runtime shared by every service. Pin loosely (>=) for a research project;
+# switch to exact pins once the stack stabilizes.
+numpy
+opencv-python-headless
+torch
+onnx
+onnxruntime-gpu
+fastapi
+uvicorn[standard]
+pydantic>=2
+pydantic-settings
+PyYAML
+structlog
+python-multipart

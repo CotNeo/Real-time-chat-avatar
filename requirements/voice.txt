@@ -1,0 +1,8 @@
+# Milestones 7-9: microphone / voice conversion.
+# Left deliberately unpinned to a specific engine (RVC vs Seed-VC) until
+# benchmarking (Milestone 9) picks a default — see docs/VOICE_MODEL_COMPARISON.md
+# once it exists. Add the winning engine's deps here, not to base.txt.
+-r base.txt
+sounddevice
+soundfile
+librosa

@@ -1,0 +1,26 @@
+{
+  "device": "/dev/video0",
+  "requested": {
+    "width": 1280,
+    "height": 720,
+    "fps": 30
+  },
+  "manual_exposure_value": 150,
+  "negotiated": {
+    "width": 1280,
+    "height": 720,
+    "fps_requested": 30,
+    "fps_reported_by_driver": 30.0,
+    "fourcc": "MJPG"
+  },
+  "duration_s": 5.016,
+  "frames_captured": 144,
+  "achieved_fps": 28.71,
+  "mean_brightness_0_255": 3.0,
+  "frame_interval_ms": {
+    "mean": 33.33,
+    "p50": 32.04,
+    "p95": 36.11,
+    "max": 36.29
+  }
+}

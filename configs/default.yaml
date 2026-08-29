@@ -1,0 +1,47 @@
+# Single source of truth for runtime configuration (Section 18 — no scattered
+# magic constants). Loaded by shared/schemas/config.py, which validates every
+# field via Pydantic and fails fast with a descriptive error on a bad value.
+#
+# Override any field with an environment variable prefixed AVATAR__, using
+# double underscores as the nesting separator, e.g.:
+#   AVATAR__VIDEO__FPS=15
+#   AVATAR__RUNTIME__DEVICE=cpu
+
+video:
+  width: 1280
+  height: 720
+  fps: 30
+  device_index: 0
+  # See docs/PROGRESS.md Milestone 2: cheap UVC webcams in low light may not
+  # sustain the requested fps regardless of this setting. Leave null to use the
+  # camera's native auto-exposure; set an integer (e.g. 150) to force a short
+  # exposure that favors frame rate over brightness — only useful with
+  # supplemental lighting, since gain compensation is often hardware-capped.
+  manual_exposure_value: null
+
+face:
+  provider: cuda          # cuda | cpu — falls back to cpu with a warning if cuda init fails
+  fp16: true
+  detection_interval: 3   # run full detection every Nth frame; track in between
+  mode: swap               # swap (Mode A, Milestone 5) | reenact (Mode B, later)
+  enhancement: "off"       # off | low | high
+
+voice:
+  engine: null             # set once Milestone 8/9 pick a default (rvc | seed-vc)
+  buffer_ms: 40
+  profile_latency_mode: balanced  # low_latency | balanced | stable
+  pitch_shift_semitones: 0
+
+runtime:
+  device: cuda
+  local_only: true         # Section 21 — never call external APIs unless this is false
+  log_level: info
+  log_format: json
+
+paths:
+  models_dir: models
+  benchmarks_dir: benchmarks
+
+virtual_devices:
+  camera_name: "AI Avatar Camera"
+  microphone_name: "AI Avatar Microphone"

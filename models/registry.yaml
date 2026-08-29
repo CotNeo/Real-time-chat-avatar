@@ -1,0 +1,26 @@
+# Model registry (Section 23). Models are never auto-downloaded from arbitrary
+# sources at runtime — only via scripts/models.py against the entries below,
+# each with a known source/license/VRAM cost recorded before it's added here.
+#
+# This file is intentionally close to empty right now: Milestone 6 (face
+# benchmarking) and Milestone 9 (voice benchmarking) are what earn a model a
+# place here, with measured numbers, not guesses. Filled in incrementally —
+# see docs/PROGRESS.md for what's actually been benchmarked so far.
+
+face:
+  # face-default:
+  #   backend: onnx
+  #   path: models/face/<model>.onnx
+  #   source: <URL>
+  #   license: <license name>
+  #   vram_mb: <measured>
+  #   sha256: <checksum>
+
+voice:
+  # voice-female-01:
+  #   backend: <rvc|seed-vc>
+  #   path: models/voice/<name>/
+  #   source: <URL>
+  #   license: <license name>
+  #   vram_mb: <measured>
+  #   sha256: <checksum>
