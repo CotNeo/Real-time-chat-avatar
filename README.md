@@ -10,17 +10,19 @@ This is a personal research/learning project for one user on one Ubuntu
 machine. No billing, no multi-tenancy, no Kubernetes — see `ARCHITECTURE.md`
 for why.
 
-**Current status: system audit, CUDA verification, camera capture, and live
-face detection are done and measured on real hardware, plus a minimal running
-FastAPI app with a browser preview. Face identity/swap, voice conversion, the
-virtual camera, and the web UI are not built yet.** See `docs/PROGRESS.md`
-for the exact, honest state of every milestone — don't trust marketing copy
-over that file.
+**Current status: system audit, CUDA verification, camera capture, live face
+detection, and reference-identity upload/validation/embedding are done and
+measured on real hardware, plus a minimal running FastAPI app with a browser
+preview. Face swap, voice conversion, the virtual camera, and the web UI are
+not built yet.** See `docs/PROGRESS.md` for the exact, honest state of every
+milestone — don't trust marketing copy over that file.
 
 Right now, with the server running (`python -m uvicorn services.api.main:app
 --port 8100`), opening `http://localhost:8100` in a browser shows your live
 webcam feed with a real-time SCRFD face detection overlay (bounding box,
-5-point landmarks, confidence, FPS) — no face swap yet, just detection.
+5-point landmarks, confidence, FPS), plus a form to upload 1-5 reference
+photos and see them validated/embedded — no face swap applied yet, that's
+Milestone 5.
 
 ## 1. Overview
 

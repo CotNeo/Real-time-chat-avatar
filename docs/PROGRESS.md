@@ -296,3 +296,68 @@ repeatedly capturing/inspecting frames of a person's face for its own sake.
 Next: Milestone 4 (reference identity — upload, validate, align, embed 1-5
 images), which can reuse this same downloaded `buffalo_l` pack's recognition
 model.
+
+---
+
+## Milestone 4 — Reference Identity
+
+Status: **DONE**
+
+Implemented, matching Section 5's exact pipeline (Upload -> Face Detection ->
+Quality Validation -> Face Alignment -> Identity Encoding -> Embedding
+Aggregation -> Avatar Identity Session):
+
+- `services/face/identity.py`: `IdentityEncoder` wraps the ArcFace recognition
+  model (`w600k_r50.onnx`) from the *same* `buffalo_l` pack Milestone 3 already
+  downloaded — no second model fetch. `align_face()` does standard 5-point
+  ArcFace alignment (`insightface.utils.face_align.norm_crop`) before encoding.
+  `process_reference_image()` runs the full per-image validation chain;
+  `build_identity_session()` aggregates accepted images into one L2-normalized
+  mean embedding.
+- Quality checks are honest, simple heuristics, not trained classifiers
+  (documented as such in the module) — Section 31: don't over-engineer an MVP:
+  - `RESOLUTION_TOO_LOW`: smaller image dimension < 200px.
+  - `NO_FACE_DETECTED` / `MULTIPLE_FACES`: from the SCRFD detector directly.
+  - `EXCESSIVE_OCCLUSION`: eye-to-eye distance < 15% of bbox width — a crude
+    proxy (real occlusion/extreme-angle often degenerates landmark spacing),
+    explicitly not a trained occlusion classifier.
+  - `TOO_BLURRY`: Laplacian variance on the aligned 112×112 crop < 60.
+- `POST /identity`, `GET /identity`, `DELETE /identity` in `services/api/main.py`.
+  Enforces the 1-5 image count (400 with a clear message outside that range).
+  The response never includes the raw embedding or the source image — only
+  filename, accept/reject, problem codes, and quality score (Section 5/21:
+  reference images are never retained past the request; there's nothing in
+  this codebase that writes an uploaded image to disk).
+- Added a small upload form to `/`'s dev page so reference photos can be
+  tested through the browser directly, without the agent ever needing to
+  see/handle them.
+- `tests/test_identity_pipeline.py`: 9 unit tests against fake detector/encoder
+  objects (fast, no GPU/model needed) covering every rejection path,
+  acceptance, embedding normalization, aggregation math, and the
+  `MAX_REFERENCE_IMAGES` cap.
+
+**Tested end-to-end against the real running API** (not just unit tests):
+using scikit-image's bundled `astronaut.png` (a standard, freely-usable public
+domain test image with one clear face) rather than the user's own photos —
+
+| Test | Input | Result |
+|---|---|---|
+| Real face, single image | astronaut.png | accepted, quality_score 0.836, session usable |
+| `GET /identity` persistence | (after above) | same session returned correctly |
+| No face | 400×400 flat gray | rejected: `no_face_detected` |
+| Too small | 50×50 | rejected: `resolution_too_low` |
+| >5 images | 6 files | HTTP 400, "Upload between 1 and 5 reference images (got 6)" |
+| 3 identical accepted images | astronaut.png ×3 | all 3 accepted, `usable: true` |
+| `DELETE /identity` | — | `{"cleared": true}`, subsequent GET shows `active: false` |
+
+All seven behaved exactly as designed. `/health` now also reports
+`identity_encoder_loaded` and `identity_session_active`.
+
+Problems: none blocking. The occlusion heuristic is intentionally crude — it
+will under- and over-flag real cases; revisit with real reference photos if it
+turns out to be a nuisance in practice, per Section 31's "don't over-engineer
+before you know it's needed."
+
+Next: Milestone 5 (real-time face transfer, Mode A) — this is the first
+milestone that actually changes what the live preview looks like, using the
+`aggregated_embedding` this milestone now produces.
