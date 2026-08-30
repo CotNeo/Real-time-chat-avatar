@@ -34,6 +34,20 @@ def _make_face():
     )
 
 
+def _install_fake(engine, swap_model):
+    """Wire a fake model into the engine the way load() would.
+
+    The engine supports two model families (inswapper, which projects the
+    embedding through an `emap`, and hyperswap, which takes it raw), so tests
+    must set the same private state load() establishes.
+    """
+    engine._swapper = swap_model
+    engine._session = swap_model
+    engine._is_hyperswap = False
+    engine._swap_size = 128
+    engine._source_embedding = np.ones(512, dtype=np.float32)
+
+
 class FakeSwapModel:
     """Stands in for insightface's INSwapper. The engine drives the ONNX
     session directly (rather than calling INSwapper.get) so that swap and
@@ -62,7 +76,8 @@ def test_process_frame_before_load_raises():
 
 def test_process_frame_without_identity_raises():
     engine = FaceSwapEngine(detector=FakeDetector([]))
-    engine._swapper = object()  # bypass load() — only testing the identity guard
+    engine._session = object()  # bypass load() — only testing the identity guard
+    engine._swapper = object()
     with pytest.raises(FaceEngineError, match="No identity loaded"):
         engine.process_frame(np.zeros((100, 100, 3), dtype=np.uint8))
 
@@ -80,7 +95,10 @@ def test_load_identity_rejects_unusable_session():
 def test_process_frame_with_no_face_passes_through_original_image():
     detector = FakeDetector([])
     engine = FaceSwapEngine(detector=detector)
-    engine._swapper = object()  # process_frame shouldn't even reach the swapper
+    engine._session = object()  # process_frame shouldn't even reach the swapper
+    engine._swapper = object()
+    engine._is_hyperswap = False
+    engine._swap_size = 128
     engine._source_embedding = np.ones(512, dtype=np.float32)
 
     frame = np.full((100, 100, 3), 77, dtype=np.uint8)
@@ -96,8 +114,7 @@ def test_detection_interval_skips_redetection_on_subsequent_frames():
     detector = FakeDetector([face])
     engine = FaceSwapEngine(detector=detector)
     engine.detection_interval = 3
-    engine._swapper = FakeSwapModel()
-    engine._source_embedding = np.ones(512, dtype=np.float32)
+    _install_fake(engine, FakeSwapModel())
 
     frame = np.zeros((200, 200, 3), dtype=np.uint8)
     ran_detection = []
@@ -126,8 +143,7 @@ def test_face_extending_past_frame_edge_skips_swap_and_reports_reason():
         def get(self, *args, **kwargs):
             raise AssertionError("swap must not run on an out-of-frame face")
 
-    engine._swapper = ExplodingSwapper()
-    engine._source_embedding = np.ones(512, dtype=np.float32)
+    _install_fake(engine, ExplodingSwapper())
 
     frame = np.full((720, 1280, 3), 60, dtype=np.uint8)
     result = engine.process_frame(frame)
@@ -142,8 +158,7 @@ def test_fully_in_frame_face_is_swapped_normally():
     detector = FakeDetector([face])
     engine = FaceSwapEngine(detector=detector)
     swap_model = FakeSwapModel()
-    engine._swapper = swap_model
-    engine._source_embedding = np.ones(512, dtype=np.float32)
+    _install_fake(engine, swap_model)
     # Colour matching is deliberately off here: this test covers the
     # swap-and-composite path, and colour transfer would (correctly) rescale
     # the fake's flat grey face toward the flat test frame, masking whether
@@ -167,14 +182,9 @@ def test_reset_clears_tracking_state_forcing_redetection():
     engine = FaceSwapEngine(detector=detector)
     engine.detection_interval = 5
 
-    class PassthroughSwapper:
-        def get(self, img, target_face, source_face, paste_back=True):
-            return img
+    _install_fake(engine, FakeSwapModel())
 
-    engine._swapper = PassthroughSwapper()
-    engine._source_embedding = np.ones(512, dtype=np.float32)
-
-    frame = np.zeros((50, 50, 3), dtype=np.uint8)
+    frame = np.zeros((200, 200, 3), dtype=np.uint8)
     engine.process_frame(frame)  # detects
     engine.process_frame(frame)  # would normally skip
     assert detector.call_count == 1

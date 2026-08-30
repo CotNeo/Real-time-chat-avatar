@@ -38,6 +38,12 @@ class FaceConfig(BaseModel):
     fp16: bool = True
     detection_interval: int = Field(default=3, ge=1)
     mode: Literal["swap", "reenact"] = "swap"
+    # inswapper  = 128px, closest match to the reference face (identity 0.83)
+    # hyperswap  = 256px, sharper and more photoreal but a looser match to the
+    #              reference (0.76); also 2.2x faster and emits its own
+    #              occlusion mask. Pick by goal: resemble a specific face, or
+    #              look real.
+    swap_model: Literal["inswapper", "hyperswap"] = "inswapper"
     # off  = no restoration (fastest, softest face)
     # fast = GPEN-BFR-256, 2.6x quicker than GFPGAN but visibly softer
     # low  = GFPGAN blended at 50%

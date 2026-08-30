@@ -30,6 +30,10 @@ face:
   fp16: true
   detection_interval: 3   # run full detection every Nth frame; track in between
   mode: swap               # swap (Mode A, Milestone 5) | reenact (Mode B, later)
+  # inswapper = 128px, matches the reference face most closely (identity 0.83)
+  # hyperswap = 256px, visibly sharper / more photoreal, looser match (0.76),
+  #             2.2x faster, and brings its own occlusion mask.
+  swap_model: hyperswap    # inswapper | hyperswap
   # off  = fastest, softest face (swap output is only 128x128 upscaled)
   # low  = GFPGAN restoration blended at 50% — keeps more of your own skin texture
   # high = GFPGAN at 85% — sharpest, but costs ~85 ms/frame extra. Measured
@@ -49,7 +53,10 @@ face:
   # Keeps your hand (or anything else) in front of your face from having a
   # generated face smeared over it. Costs ~46 ms/frame — turn off only if you
   # need the frame rate more than you need that fixed.
-  occlusion_mask: true
+  # Redundant when swap_model is hyperswap — that model emits its own occlusion
+  # mask, and dropping the separate XSeg pass measured 66.0 -> 58.8 ms (15.2 ->
+  # 17.0 FPS) with no loss. Turn on if you switch back to inswapper.
+  occlusion_mask: false
   # Reach of the face mask. 1.3 includes the forehead and temples, so raising
   # or furrowing your brow shows on the swapped face; 1.04 stopped at the
   # eyebrows and left your own forehead visible.

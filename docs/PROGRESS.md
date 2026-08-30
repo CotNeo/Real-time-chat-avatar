@@ -1240,3 +1240,76 @@ opens the camera afterwards.
 
 Config: `video.face_metered_exposure` (default on) and
 `video.target_face_brightness` (default 118).
+
+---
+
+## Milestone 6c — Swap model bake-off, round two: hyperswap wins on realism
+
+Status: **DONE**
+
+The user's standard is photorealism (viewers knowing it's AI is fine; looking
+fake is not). That reframes a decision made back in Milestone 5d, where
+`hyperswap` was rejected purely because it scored lower on identity similarity
+to the reference embedding. Under a realism standard, that metric was the
+wrong tiebreaker.
+
+Re-tested properly, on the actual use case this time — a **male target with a
+female reference set**, which is what the user is doing and what none of the
+earlier comparisons used:
+
+| Model | Res | Time | Identity | Reads as |
+|---|---|---|---|---|
+| inswapper_128 | 128px | 62.1 ms | **0.831** | female |
+| hyperswap_1b | 256px | 28.6 ms | 0.757 | female |
+| hyperswap_1c | 256px | **27.9 ms** | 0.760 | female |
+
+All three produce a face the gender model reads as female, so the
+male-to-female transfer works in every case. inswapper still matches the
+reference embedding more closely — but side by side, **hyperswap is visibly
+more photoreal**: twice the resolution means far less upscaling, so skin
+texture and eye detail survive instead of smearing.
+
+Identity similarity measures "does this resemble the specific reference photo",
+which matters when impersonating a particular face. The references here are
+synthetic people who don't exist, so there is no specific face to match — the
+goal is only that the result look real. On that criterion hyperswap wins, and
+the earlier decision was made against the wrong yardstick.
+
+### Full-pipeline result
+
+hyperswap also emits its own occlusion mask as a second output, which makes the
+separate XSeg pass redundant:
+
+| Configuration | ms | FPS | Identity |
+|---|---|---|---|
+| inswapper + XSeg | 93.8 | 10.7 | 0.753 |
+| hyperswap + XSeg | 66.0 | 15.2 | 0.714 |
+| **hyperswap (own mask)** | **58.8** | **17.0** | 0.729 |
+
+**17 FPS is above this webcam's ~15 FPS ceiling** — the GPU is now completely
+out of the way, and one model has been dropped from the pipeline entirely.
+VRAM sits at 2.6 GB.
+
+New defaults: `face.swap_model: hyperswap`, `face.occlusion_mask: false`
+(redundant with hyperswap's own mask; turn it back on if switching to
+inswapper). `swap_model: inswapper` remains one line away for anyone who wants
+the closest possible match to a specific reference face.
+
+### Two bugs found while adding the second model family
+
+1. `warm_up()` assumed the insightface `INSwapper` wrapper and crashed for
+   hyperswap, which drives the ONNX session directly (no `emap`, raw embedding).
+   Rewritten to handle both families.
+2. `_session`, `_is_hyperswap` and `_swap_size` were only assigned inside
+   `load()`, so calling `process_frame()` before `load()` raised a bare
+   `AttributeError` instead of the descriptive `FaceEngineError` the guard was
+   written to produce. Now initialised in `__init__`.
+
+### Standing limitation, unchanged
+
+This improves how real the *face* looks. It does not change what the model
+touches: hair, jawline, neck, beard shadow, shoulders and body remain the
+user's own footage. Those are the elements carrying most of the remaining
+male read, and no face-region model addresses them — the practical remedies
+are physical (wig, front lighting, tighter head-and-shoulders framing), not
+code.

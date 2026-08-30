@@ -65,6 +65,21 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SWAP_MODEL_PATH = (
     REPO_ROOT / "models" / "face" / "models" / "inswapper" / "inswapper_128.onnx"
 )
+# Alternative swap model. Measured against inswapper on a male target with a
+# female reference set (docs/PROGRESS.md, Milestone 6c):
+#
+#   inswapper_128   128px  62.1 ms  identity 0.831
+#   hyperswap_1c    256px  27.9 ms  identity 0.760
+#
+# hyperswap scores lower on similarity to the reference embedding but is
+# visibly sharper and more natural — twice the resolution means far less
+# upscaling. Which one is "better" depends on the goal: matching a specific
+# face favours inswapper, looking photoreal favours hyperswap. It also emits
+# its own occlusion mask as a second output, so it can stand in for the
+# separate XSeg pass.
+HYPERSWAP_MODEL_PATH = (
+    REPO_ROOT / "models" / "face" / "models" / "inswapper" / "hyperswap_1c_256.onnx"
+)
 
 
 class FaceSwapEngine(FaceEngine):
@@ -107,6 +122,12 @@ class FaceSwapEngine(FaceEngine):
         # 1.3 reaches the hairline and temples; measured no quality cost.
         self.mask_expand = 1.3
         self._swapper = None
+        # Initialised here, not only in load(), so process_frame() before
+        # load() raises the descriptive FaceEngineError it intends rather than
+        # a bare AttributeError.
+        self._session = None
+        self._is_hyperswap = False
+        self._swap_size = 128
         self._source_embedding: np.ndarray | None = None
         self.actual_providers: list[str] = []
         # Tracking state (Section 6): reuse the last bbox/landmarks for a few
@@ -121,6 +142,7 @@ class FaceSwapEngine(FaceEngine):
                 f"Face swap model not found at {self.model_path}.\n"
                 "Run: python scripts/models.py install face-swap"
             )
+        self._is_hyperswap = False
 
         from shared.utils.cuda_env import ensure_onnxruntime_cuda_libs
 
@@ -138,8 +160,24 @@ class FaceSwapEngine(FaceEngine):
             else ["CPUExecutionProvider"]
         )
         session = onnxruntime.InferenceSession(str(self.model_path), providers=requested)
-        self._swapper = INSwapper(model_file=str(self.model_path), session=session)
         self.actual_providers = session.get_providers()
+
+        # hyperswap takes the raw 512-d embedding and has no `emap`
+        # projection; inswapper projects the embedding through one. Detect
+        # which family this file is rather than trusting the filename.
+        self._is_hyperswap = "hyperswap" in self.model_path.name.lower()
+        if self._is_hyperswap:
+            self._session = session
+            self._input_names = [i.name for i in session.get_inputs()]
+            self._output_names = [o.name for o in session.get_outputs()]
+            self._swap_size = session.get_inputs()[
+                next(i for i, n in enumerate(self._input_names) if "target" in n)
+            ].shape[2]
+            self._swapper = None
+        else:
+            self._swapper = INSwapper(model_file=str(self.model_path), session=session)
+            self._session = session
+            self._swap_size = 128
 
         if self.use_gpu and not any(
             p in self.actual_providers
@@ -162,29 +200,44 @@ class FaceSwapEngine(FaceEngine):
         self.reset()
 
     def warm_up(self) -> None:
-        if self._swapper is None:
+        if self._session is None:
             raise FaceEngineError("FaceSwapEngine.warm_up() called before load().")
-        # Bug found and fixed during Milestone 5 testing (docs/PROGRESS.md): an
-        # all-zeros dummy embedding projects through the model's internal emap
-        # matrix to an all-zero latent, whose norm is exactly 0 — the
-        # subsequent `latent /= norm` inside insightface's own INSwapper.get()
-        # then divides 0/0, raising "invalid value encountered in divide" and
-        # producing a NaN-filled warm-up output. Harmless in isolation (this
-        # call's result is discarded), but confusing to debug later, and it's
-        # trivially avoided with any non-degenerate unit vector instead.
-        dummy_target = SimpleNamespace(kps=_dummy_landmarks())
+
+        # Use a non-degenerate unit vector, never zeros. Bug found during
+        # Milestone 5 testing: an all-zeros embedding projects through
+        # inswapper's emap to an all-zero latent whose norm is 0, and the
+        # following `latent /= norm` divides 0/0 — "invalid value encountered
+        # in divide" plus a NaN-filled result. Harmless here (the output is
+        # discarded) but confusing to debug later, and trivially avoided.
         dummy_vector = np.ones(512, dtype=np.float32)
         dummy_vector /= np.linalg.norm(dummy_vector)
-        dummy_source = SimpleNamespace(normed_embedding=dummy_vector)
-        dummy_frame = np.zeros((256, 256, 3), dtype=np.uint8)
-        self._swapper.get(dummy_frame, dummy_target, dummy_source, paste_back=True)
+        size = self._swap_size
+        dummy_blob = np.zeros((1, 3, size, size), dtype=np.float32)
+
+        if self._is_hyperswap:
+            latent = dummy_vector.reshape((1, -1))
+            feeds = {
+                name: (dummy_blob if "target" in name else latent)
+                for name in self._input_names
+            }
+            self._session.run(self._output_names, feeds)
+        else:
+            latent = dummy_vector.reshape((1, -1)) @ self._swapper.emap
+            latent /= np.linalg.norm(latent)
+            self._swapper.session.run(
+                self._swapper.output_names,
+                {
+                    self._swapper.input_names[0]: dummy_blob,
+                    self._swapper.input_names[1]: latent.astype(np.float32),
+                },
+            )
 
     def reset(self) -> None:
         self._last_faces = []
         self._frames_since_detect = 0
 
     def process_frame(self, frame: np.ndarray) -> FaceFrameResult:
-        if self._swapper is None:
+        if self._session is None:
             raise FaceEngineError("FaceSwapEngine.process_frame() called before load().")
         if self._source_embedding is None:
             raise FaceEngineError(
@@ -285,16 +338,36 @@ class FaceSwapEngine(FaceEngine):
         work_size = self.enhancer.size if self.enhancer is not None else 256
         aligned, affine_matrix = face_align.norm_crop2(frame, landmarks, work_size)
 
-        swap_input = cv2.resize(aligned, (128, 128), interpolation=cv2.INTER_AREA)
+        size = self._swap_size
+        swap_input = cv2.resize(aligned, (size, size), interpolation=cv2.INTER_AREA)
         blob = cv2.dnn.blobFromImage(
-            swap_input, 1.0 / 255.0, (128, 128), (0.0, 0.0, 0.0), swapRB=True
+            swap_input, 1.0 / 255.0, (size, size), (0.0, 0.0, 0.0), swapRB=True
         )
-        latent = self._source_embedding.reshape((1, -1)) @ self._swapper.emap
-        latent /= np.linalg.norm(latent)
-        prediction = self._swapper.session.run(
-            self._swapper.output_names,
-            {self._swapper.input_names[0]: blob, self._swapper.input_names[1]: latent},
-        )[0]
+
+        model_mask = None
+        if self._is_hyperswap:
+            # Raw embedding, no emap projection.
+            latent = self._source_embedding.reshape((1, -1)).astype(np.float32)
+            feeds = {
+                name: (blob if "target" in name else latent)
+                for name in self._input_names
+            }
+            outputs = self._session.run(self._output_names, feeds)
+            prediction = outputs[0]
+            if len(outputs) > 1:
+                # Second output is the model's own occlusion mask.
+                model_mask = np.clip(outputs[1][0, 0], 0.0, 1.0)
+        else:
+            latent = self._source_embedding.reshape((1, -1)) @ self._swapper.emap
+            latent /= np.linalg.norm(latent)
+            prediction = self._swapper.session.run(
+                self._swapper.output_names,
+                {
+                    self._swapper.input_names[0]: blob,
+                    self._swapper.input_names[1]: latent,
+                },
+            )[0]
+
         swapped = np.clip(255 * prediction.transpose((0, 2, 3, 1))[0], 0, 255)
         swapped = swapped.astype(np.uint8)[:, :, ::-1]  # RGB -> BGR
 
@@ -318,6 +391,14 @@ class FaceSwapEngine(FaceEngine):
                 face_mask = self.masker.build_mask(
                     dense, affine_matrix, work_size, expand=self.mask_expand
                 )
+
+        # hyperswap emits its own occlusion mask, so it can cover this without
+        # the separate XSeg pass.
+        if model_mask is not None:
+            resized = cv2.resize(
+                model_mask, (work_size, work_size), interpolation=cv2.INTER_LINEAR
+            )
+            face_mask = resized if face_mask is None else face_mask * resized
 
         # Occlusion mask: multiply in, so anything held in front of the face
         # (a hand, a mug) keeps its real pixels instead of having a generated

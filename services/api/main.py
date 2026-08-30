@@ -196,7 +196,20 @@ def _startup() -> None:
 
     if _detector is not None:
         try:
-            swap_engine = FaceSwapEngine(detector=_detector, enhancer=_enhancer)
+            from services.face.swapper import (
+                DEFAULT_SWAP_MODEL_PATH,
+                HYPERSWAP_MODEL_PATH,
+            )
+
+            swap_engine = FaceSwapEngine(
+                detector=_detector,
+                enhancer=_enhancer,
+                model_path=(
+                    HYPERSWAP_MODEL_PATH
+                    if config.face.swap_model == "hyperswap"
+                    else DEFAULT_SWAP_MODEL_PATH
+                ),
+            )
             swap_engine.load()
             swap_engine.warm_up()
             swap_engine.masker = _masker
@@ -208,6 +221,7 @@ def _startup() -> None:
                 "face_swap_engine_loaded",
                 providers=swap_engine.actual_providers,
                 mask=config.face.mask,
+                swap_model=config.face.swap_model,
                 color_match=config.face.color_match,
                 occlusion_mask=_occluder is not None,
             )
@@ -244,6 +258,7 @@ def health() -> dict:
         and _identity_session.is_usable,
         "face_swap_engine_loaded": _swap_engine is not None,
         "face_swap_engine_providers": _swap_engine.actual_providers if _swap_engine else None,
+        "swap_model": config.face.swap_model,
         "face_enhancement": config.face.enhancement,
         "face_enhancer_loaded": _enhancer is not None,
         "face_mask": config.face.mask,
