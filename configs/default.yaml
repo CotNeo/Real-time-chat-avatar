@@ -18,6 +18,12 @@ video:
   # exposure that favors frame rate over brightness — only useful with
   # supplemental lighting, since gain compensation is often hardware-capped.
   manual_exposure_value: null
+  # Expose for your FACE, not the whole scene. Without this, a bright window
+  # behind you makes the camera darken everything and the swap degrades. Note
+  # it can lower FPS in a dim room: a longer exposure is what makes the face
+  # brighter, and exposure time caps frame rate.
+  face_metered_exposure: true
+  target_face_brightness: 118
 
 face:
   provider: cuda          # cuda | cpu — falls back to cpu with a warning if cuda init fails

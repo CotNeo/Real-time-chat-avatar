@@ -36,6 +36,7 @@ from shared.logging.logger import configure_logging, get_logger
 from shared.schemas.config import load_config
 from shared.schemas.identity import IdentitySession
 from shared.utils.camera import CameraConfig, CameraError, ThreadedCameraStream
+from shared.utils.exposure import ExposureConfig, FaceExposureController
 
 # Below this mean-brightness value (0-255), Milestone 5 testing showed the
 # swap model's output visibly degrades into incoherent noise — not a code bug,
@@ -68,11 +69,12 @@ _swap_engine: FaceSwapEngine | None = None
 _last_detect_ms: float = 0.0
 _identity_session: IdentitySession | None = None
 _session_active: bool = False
+_exposure_controller: FaceExposureController | None = None
 
 
 @app.on_event("startup")
 def _startup() -> None:
-    global _camera_stream, _detector, _encoder, _swap_engine
+    global _camera_stream, _detector, _encoder, _swap_engine, _exposure_controller
     cam_config = CameraConfig(
         device_index=config.video.device_index,
         width=config.video.width,
@@ -84,6 +86,16 @@ def _startup() -> None:
         _camera_stream = ThreadedCameraStream(cam_config)
         _camera_stream.start()
         log.info("camera_started", device_index=cam_config.device_index)
+        if config.video.face_metered_exposure:
+            _exposure_controller = FaceExposureController(
+                ExposureConfig(
+                    target_face_brightness=config.video.target_face_brightness
+                )
+            )
+            log.info(
+                "face_metered_exposure_enabled",
+                target=config.video.target_face_brightness,
+            )
     except CameraError as e:
         # Section 20: the API must still come up and explain itself — a missing
         # camera should not crash the whole service, since /health and
@@ -209,6 +221,10 @@ def _startup() -> None:
 
 @app.on_event("shutdown")
 def _shutdown() -> None:
+    # Exposure is a stateful UVC setting that outlives this process — hand it
+    # back to auto so other apps don't inherit our manual value.
+    if _exposure_controller is not None and _camera_stream is not None:
+        _exposure_controller.release(_camera_stream.capture)
     if _camera_stream is not None:
         _camera_stream.stop()
         log.info("camera_stopped")
@@ -234,6 +250,11 @@ def health() -> dict:
         "landmark_masker_loaded": _masker is not None,
         "color_match": config.face.color_match,
         "mask_expand": config.face.mask_expand,
+        "face_metered_exposure": config.video.face_metered_exposure,
+        "face_brightness": round(_exposure_controller.last_face_brightness, 1)
+        if _exposure_controller and _exposure_controller.last_face_brightness
+        else None,
+        "camera_exposure": _exposure_controller.exposure if _exposure_controller else None,
         "occlusion_mask_loaded": _occluder is not None,
         "session_active": _session_active,
         "config": {
@@ -400,6 +421,8 @@ def _mjpeg_generator():
         if _session_active and _swap_engine is not None:
             result = _swap_engine.process_frame(image)
             _last_detect_ms = result.timings_ms.get("detect", 0.0)
+            if _exposure_controller is not None and result.bbox is not None:
+                _exposure_controller.update(_camera_stream.capture, image, result.bbox)
             image = result.output_image.copy()
             label = f"SWAP ACTIVE  faces: {1 if result.face_detected else 0}  FPS: {_camera_stream.fps:.1f}"
             cv2.putText(image, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
@@ -411,6 +434,8 @@ def _mjpeg_generator():
         elif _detector is not None:
             faces, detect_ms = _detector.detect(image)
             _last_detect_ms = detect_ms
+            if _exposure_controller is not None and faces:
+                _exposure_controller.update(_camera_stream.capture, image, faces[0].bbox)
             image = draw_detection_overlay(image.copy(), faces, _camera_stream.fps, detect_ms)
 
         if brightness < LOW_LIGHT_WARNING_THRESHOLD:

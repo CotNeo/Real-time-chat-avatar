@@ -232,6 +232,12 @@ class ThreadedCameraStream:
     def fps(self) -> float:
         return self._camera.fps
 
+    @property
+    def capture(self):
+        """The live cv2.VideoCapture, for components that must drive camera
+        controls (see shared/utils/exposure.py). None before start()."""
+        return self._camera._cap
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:

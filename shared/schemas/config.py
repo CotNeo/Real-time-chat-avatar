@@ -25,6 +25,12 @@ class VideoConfig(BaseModel):
     fps: int = 30
     device_index: int = 0
     manual_exposure_value: int | None = None
+    # Meter exposure on the detected face instead of the whole scene. Fixes
+    # backlighting (a window behind you) underexposing your face, which
+    # degrades everything downstream. Costs frame rate in dim rooms, because
+    # brightness is bought with exposure time.
+    face_metered_exposure: bool = True
+    target_face_brightness: float = Field(default=118.0, ge=40.0, le=200.0)
 
 
 class FaceConfig(BaseModel):

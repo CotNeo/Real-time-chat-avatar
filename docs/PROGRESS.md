@@ -1171,3 +1171,72 @@ line away for anyone who prefers still-frame quality.
 
 Engine cache: 504 MB in `.trt_cache/` (gitignored). First run per model pays
 the build cost once — XSeg's took 7.5 minutes.
+
+---
+
+## Milestone 6b — Face-metered exposure (backlighting fix)
+
+Status: **DONE** (control loop verified on real hardware; live face confirmation
+pending a person in frame)
+
+The user reported the output still wasn't right and sent a frame. The frame
+diagnosed itself: a bright window/curtain directly behind them, face in shadow.
+That is not a model problem — it is a *capture* problem, and it poisons
+everything downstream, because the swap model receives a dark noisy 128px crop
+and can only return a washed-out face.
+
+The camera's own auto-exposure meters the whole scene, so a bright background
+drags the average up and the face is left underexposed. Whole-frame brightness
+can look acceptable while the face is far too dark — which is exactly why
+earlier brightness checks in this project (which measured the whole frame)
+under-reported the problem.
+
+### Measured exposure response (Logitech C510, this room)
+
+| exposure | frame brightness | FPS |
+|---|---|---|
+| 200 | 17.9 | 33.1 |
+| 500 | 46.3 | 22.5 |
+| 800 | 68.2 | 15.2 |
+| 1200 | 87.9 | 11.0 |
+| 1600 | 101.5 | 9.0 |
+| 2000 | 106.9 | 7.1 |
+
+The camera *can* deliver a well-lit image; it just has to be told to. Note the
+trade this exposes: brightness is bought with exposure time, and exposure time
+caps frame rate. Surfaced rather than hidden — a well-exposed face at 11 FPS
+makes a far better swap than a dark one at 15 FPS, since input quality bounds
+output quality.
+
+### Implementation
+
+`shared/utils/exposure.py` — `FaceExposureController` measures **face-region
+luma only** (Y channel, not a BGR mean: a warm indoor colour cast skews a raw
+channel average) and drives `CAP_PROP_EXPOSURE` toward a target. Proportional
+correction scaled by the current value, damped (`gain` 0.35) and throttled
+(every 8th frame) so exposure walks smoothly instead of visibly pumping. The
+background is allowed to blow out, which is the correct trade: the face is the
+only region the pipeline reconstructs.
+
+On shutdown it restores auto-exposure. This matters — UVC exposure is a
+stateful device setting that outlives the process (established back in
+Milestone 2), so leaving it pinned would affect every other application that
+opens the camera afterwards.
+
+### Verification
+
+- 8 unit tests against a fake capture: face-region metering ignores a bright
+  background, dark faces raise exposure, blown-out faces lower it, an
+  already-correct face is left completely alone, clamping holds, no-bbox is a
+  no-op, throttling holds, and release restores auto.
+- **Real hardware**: driving the controller against the live camera with a
+  target of 55 moved the measured region from 111.9 to 62.4 and settled
+  exposure at 182 — the loop genuinely commands the device, it is not just
+  arithmetic. A first run where the region already sat at 121 against a target
+  of 118 correctly produced *no* change, confirming the dead-band works.
+- Not yet confirmed: the end-to-end improvement with a real backlit face, which
+  needs the user in frame. Exposed on `/health` as `face_brightness` and
+  `camera_exposure` so it can be watched live.
+
+Config: `video.face_metered_exposure` (default on) and
+`video.target_face_brightness` (default 118).
