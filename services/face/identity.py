@@ -165,7 +165,10 @@ class IdentityEncoder:
         self._model = model
         self.actual_providers = model.session.get_providers()
 
-        if self.use_gpu and "CUDAExecutionProvider" not in self.actual_providers:
+        if self.use_gpu and not any(
+            p in self.actual_providers
+            for p in ("CUDAExecutionProvider", "TensorrtExecutionProvider")
+        ):
             raise IdentityEncoderError(
                 f"Requested CUDA for identity encoding but got {self.actual_providers}. "
                 "See services/face/detector.py's identical check for the known cause "

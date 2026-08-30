@@ -38,3 +38,6 @@ benchmarks/*.png
 # OS / editor
 .DS_Store
 *.swp
+
+# TensorRT engine cache — rebuilt on demand, large, machine-specific
+.trt_cache/

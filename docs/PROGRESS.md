@@ -1008,3 +1008,166 @@ face:
   color_match: true
   occlusion_mask: true
 ```
+
+---
+
+## Milestone 6 — Performance: enhancer options and TensorRT
+
+Status: **IN PROGRESS** (TensorRT verified working with a large measured win)
+
+Frame rate, not per-frame detail, is now the dominant realism problem: 5 FPS
+reads as "processed video" no matter how good a single frame looks. This
+milestone attacks that.
+
+### Preset table (measured, RTX 2060, 720p, real pipeline end to end)
+
+| Preset | Stages | ms/frame | FPS |
+|---|---|---|---|
+| maximum | GFPGAN-512 + occlusion | 208.9 | 4.8 |
+| quality | GFPGAN-512, no occlusion | 173.2 | 5.8 |
+| balanced | GPEN-256 + occlusion | 145.1 | 6.9 |
+| fast | GPEN-256, no occlusion | 112.2 | 8.9 |
+| raw | swap only | 75.5 | 13.2 |
+
+`GPEN-BFR-256` was added as `face.enhancement: fast` — 31.4 ms versus GFPGAN's
+83.0 ms (2.6x) but visibly softer eyes and skin, which is the exact quality the
+stage exists to restore. Offered as an option, deliberately not the default.
+
+Note the ceiling: this webcam delivers ~15 FPS in the current room light, so
+even the `raw` preset is close to camera-limited. Chasing 30 FPS is pointless
+until the lighting is fixed — a lamp is worth more than any code change here.
+
+### TensorRT: installed, verified, and a much bigger win than expected
+
+`TensorrtExecutionProvider` was listed by onnxruntime from the very first
+Milestone 1 check but was never usable — `ldd` on the provider `.so` showed
+`libnvinfer.so.10 => not found`. Exactly the trap CUDA presented earlier in
+this project: **a provider appearing in `get_available_providers()` says
+nothing about whether it can run.** Installed `tensorrt==10.16.1.11` (~4 GB on
+disk) and confirmed the provider genuinely activates by checking
+`session.get_providers()[0]`, not by assuming.
+
+Measured on GPEN-BFR-256:
+
+```
+CUDA            33.3 ms
+TensorRT fp16    7.4 ms     -> 4.48x
+```
+
+That is far beyond the 1.5-2x expected from TensorRT and, if it holds across
+the other models, changes the whole frame-rate picture.
+
+**fp16 output was verified, not trusted.** This project has already been
+burned once by an fp16 *weights* file that was silently corrupted
+(Milestone 5). TensorRT fp16 is a different mechanism (fp16 compute on fp32
+weights), but it got the same scrutiny: TRT and CUDA outputs differ
+numerically (mean absolute difference 8.78/255, 27.8% of pixels beyond 10
+levels) yet are visually indistinguishable side by side — same sharpness, same
+detail, no artifacts. Precision noise, not degradation. Safe to use.
+
+Engine caching is enabled (`trt_engine_cache_path`), so the one-time build cost
+is paid once per model rather than on every start.
+
+Remaining: benchmark inswapper_128, GFPGAN-512 and XSeg under TensorRT (build
+times for the larger graphs run into minutes), verify their outputs the same
+way, then wire provider selection into config and re-measure the presets.
+
+### TensorRT results — and the failure the speed numbers hid
+
+All four models got dramatically faster under TensorRT fp16:
+
+| Model | CUDA | TensorRT fp16 | Speedup |
+|---|---|---|---|
+| inswapper_128 | 54.0 ms | 13.5 ms | 3.99x |
+| GFPGAN-512 | 81.5 ms | 26.1 ms | 3.13x |
+| GPEN-BFR-256 | 33.3 ms | 7.4 ms | 4.48x |
+| dfl_xseg | 28.9 ms | 4.5 ms | 6.46x |
+
+Taken at face value that turns the `maximum` preset from 4.8 FPS into roughly
+13 FPS. **It would also have shipped broken output**, and the only reason it
+didn't is that identity was measured rather than eyeballed.
+
+**TensorRT fp16 destroys identity transfer in `inswapper_128`:**
+
+```
+CUDA  identity similarity: 0.8308
+TRT   identity similarity: 0.1218
+```
+
+For scale: an untouched frame of a *different person* scores ~0.25 against the
+reference. So the TRT output does not merely lose some resemblance — it scores
+**below the different-person baseline**, i.e. it carries no reference identity
+at all. The image confirms it: visible streaked artifacts and a face that is
+not the reference person.
+
+This is the second time in this project that an fp16 path has been fast and
+silently wrong (the first was the corrupted fp16 *weights* file in
+Milestone 5). Different mechanism, identical failure mode, identical lesson:
+**a speedup number is not a result.** Anything that changes numerics gets its
+output verified before it is believed — and for the swap stage specifically,
+verified with the identity metric, because "looks like a plausible face" is
+exactly what a broken swap still produces.
+
+Engine build times are also worth recording: XSeg took **446.7 s** (7.5 min) to
+build, which is what silently timed out an earlier 10-minute benchmark run.
+Cached engines currently occupy 504 MB in `.trt_cache/`.
+
+Now testing whether the wins can be kept selectively: TensorRT **fp32** for the
+swap model (precision may be the culprit rather than TensorRT itself), and
+output verification for GFPGAN and XSeg before either is allowed to use fp16.
+
+### Selective TensorRT: keeping the speed without the breakage
+
+Testing each model both ways produced a clean split:
+
+| Model | Verified config | Result |
+|---|---|---|
+| inswapper_128 | TensorRT **fp32** | identity **0.8307** vs CUDA's 0.8308 — preserved exactly; 54.7 -> 45.5 ms |
+| GFPGAN-512 | TensorRT **fp32** | output **bit-identical** to CUDA (0.00/255 diff); 80.9 -> 70.2 ms |
+| GPEN-BFR-256 | TensorRT fp16 | visually identical; 33.3 -> 7.4 ms |
+| dfl_xseg | TensorRT fp16 | mask diff 0.0001, identical coverage; 28.9 -> 4.5 ms |
+
+So the culprit was fp16, not TensorRT. The pattern is consistent and worth
+carrying forward: **fp16 broke both models whose output is a generated face**
+(identity transfer, restoration) and was harmless on the model whose output is
+a mask. GFPGAN's fp16 failure was total — a blank brown image, no face.
+
+Encoded in `shared/utils/providers.py` as a per-model table, with the
+measurement that justified each choice written next to it. An unlisted model
+falls back to CUDA (the conservative default — no model silently gets a
+precision mode nobody verified), and if TensorRT is missing entirely
+everything falls back to CUDA: slower, never broken.
+
+Two real bugs were fixed while wiring it up:
+1. `import tensorrt` is required for libnvinfer to become resident in the
+   process. Without it onnxruntime lists the provider and silently runs on
+   CUDA — the identical load-order trap already documented for cuBLAS/cuDNN in
+   `shared/utils/cuda_env.py`.
+2. Every engine's "did we actually get the GPU?" guard tested only for
+   `CUDAExecutionProvider` and would have rejected a working TensorRT session.
+
+### Final measured pipeline (RTX 2060, 720p, real end-to-end)
+
+| Preset | Before | After | FPS before | FPS after | Identity |
+|---|---|---|---|---|---|
+| maximum (GFPGAN + occlusion) | 208.9 ms | 160.1 ms | 4.8 | 6.2 | 0.779 |
+| **balanced (GPEN-256 + occlusion)** | 145.1 ms | **75.0 ms** | 6.9 | **13.3** | 0.753 |
+| fast (GPEN-256) | 112.2 ms | 71.2 ms | 8.9 | 14.0 | 0.767 |
+| raw (swap only) | 75.5 ms | 64.0 ms | 13.2 | 15.6 | 0.812 |
+
+(The `maximum` row still used CUDA for GFPGAN; with the fp32 entry added
+afterwards it should land near 150 ms.)
+
+VRAM with everything loaded dropped from ~4.2 GB to **2.4 GB / 6.1 GB** —
+TensorRT engines are more compact than the CUDA provider's workspaces, which
+buys real headroom for the voice engine in Milestones 7-9.
+
+**Default changed to `enhancement: fast`.** At 13.3 FPS the pipeline now sits
+at this webcam's own ceiling (~15 FPS in current light), so the GPU has stopped
+being the bottleneck — lighting and the camera are. GFPGAN renders a sharper
+face, but 6 FPS motion reads as processed video, which costs more believability
+than the extra per-frame detail buys. `enhancement: high` remains one config
+line away for anyone who prefers still-frame quality.
+
+Engine cache: 504 MB in `.trt_cache/` (gitignored). First run per model pays
+the build cost once — XSeg's took 7.5 minutes.

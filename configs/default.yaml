@@ -28,7 +28,12 @@ face:
   # low  = GFPGAN restoration blended at 50% — keeps more of your own skin texture
   # high = GFPGAN at 85% — sharpest, but costs ~85 ms/frame extra. Measured
   #        numbers for each level are in docs/PROGRESS.md, Milestone 5c.
-  enhancement: high        # off | low | high
+  # Default is `fast` (GPEN-256), not `high` (GFPGAN). Measured with TensorRT:
+  # fast reaches 13.3 FPS against high's 6.2. GFPGAN renders a sharper face,
+  # but at ~6 FPS the motion itself reads as processed video, which costs more
+  # realism than the extra per-frame detail buys. Switch to `high` if you
+  # prefer maximum still-frame quality over smooth motion.
+  enhancement: fast        # off | fast | low | high
   # contour = mask to the real face outline, keeping YOUR hair/ears sharp and
   #           natural (recommended — measured clearly more realistic).
   # square  = paste the whole aligned crop, which also paints over hair with

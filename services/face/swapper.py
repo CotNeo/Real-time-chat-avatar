@@ -83,6 +83,9 @@ class FaceSwapEngine(FaceEngine):
         self._detector = detector
         self.model_path = model_path
         self.use_gpu = use_gpu
+        # TensorRT fp32 for this model: fp16 destroys identity transfer
+        # (0.831 -> 0.122). See shared/utils/providers.py.
+        self.use_tensorrt = True
         # Optional restoration stage (Section 15's face.enhancement setting).
         # When present, process_frame() takes a fused path that shares one
         # alignment and one paste-back between swap and enhancement instead of
@@ -127,8 +130,10 @@ class FaceSwapEngine(FaceEngine):
         import onnxruntime
         from insightface.model_zoo.inswapper import INSwapper
 
+        from shared.utils.providers import providers_for
+
         requested = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            providers_for("swap", use_tensorrt=self.use_tensorrt)
             if self.use_gpu
             else ["CPUExecutionProvider"]
         )
@@ -136,7 +141,10 @@ class FaceSwapEngine(FaceEngine):
         self._swapper = INSwapper(model_file=str(self.model_path), session=session)
         self.actual_providers = session.get_providers()
 
-        if self.use_gpu and "CUDAExecutionProvider" not in self.actual_providers:
+        if self.use_gpu and not any(
+            p in self.actual_providers
+            for p in ("CUDAExecutionProvider", "TensorrtExecutionProvider")
+        ):
             raise FaceEngineError(
                 f"Requested CUDA for face swap but got {self.actual_providers}. "
                 "See services/face/detector.py's identical check for the known "
@@ -274,7 +282,7 @@ class FaceSwapEngine(FaceEngine):
         # Work at 512 when restoring (the enhancer's fixed input size), else
         # 256 — enough to keep the 128px swap result from being resampled up
         # and straight back down, without paying for pixels nothing reads.
-        work_size = ENHANCER_SIZE if self.enhancer is not None else 256
+        work_size = self.enhancer.size if self.enhancer is not None else 256
         aligned, affine_matrix = face_align.norm_crop2(frame, landmarks, work_size)
 
         swap_input = cv2.resize(aligned, (128, 128), interpolation=cv2.INTER_AREA)

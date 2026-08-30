@@ -55,7 +55,7 @@ app = FastAPI(title="Real-Time AI Avatar — control API", version="0.0.1-milest
 # Section 15's face.enhancement levels map to how strongly the restored face
 # is blended over the raw swap. Full strength can look plasticky/over-smoothed,
 # so "high" stops short of 1.0 deliberately.
-_ENHANCEMENT_BLEND = {"low": 0.5, "high": 0.85}
+_ENHANCEMENT_BLEND = {"fast": 0.85, "low": 0.5, "high": 0.85}
 
 _camera_stream: ThreadedCameraStream | None = None
 _detector: FaceDetector | None = None
@@ -125,7 +125,19 @@ def _startup() -> None:
     global _enhancer
     if config.face.enhancement != "off":
         try:
-            enhancer = FaceEnhancer(blend=_ENHANCEMENT_BLEND[config.face.enhancement])
+            from services.face.enhancer import (
+                DEFAULT_ENHANCER_MODEL_PATH,
+                FAST_ENHANCER_MODEL_PATH,
+            )
+
+            enhancer = FaceEnhancer(
+                model_path=(
+                    FAST_ENHANCER_MODEL_PATH
+                    if config.face.enhancement == "fast"
+                    else DEFAULT_ENHANCER_MODEL_PATH
+                ),
+                blend=_ENHANCEMENT_BLEND[config.face.enhancement],
+            )
             enhancer.load()
             enhancer.warm_up()
             _enhancer = enhancer

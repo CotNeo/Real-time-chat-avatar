@@ -31,7 +31,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENHANCER_MODEL_PATH = (
     REPO_ROOT / "models" / "face" / "models" / "enhancer" / "GFPGANv1.4.onnx"
 )
+FAST_ENHANCER_MODEL_PATH = (
+    REPO_ROOT / "models" / "face" / "models" / "enhancer" / "GPEN-BFR-256.onnx"
+)
 
+# The working size the rest of the pipeline aligns to. Both supported
+# enhancers are square and fixed-size; the value below is the default (GFPGAN)
+# and FaceEnhancer.size reports the actual one in use.
 ENHANCER_SIZE = 512
 
 
@@ -56,8 +62,17 @@ class FaceEnhancer:
         blend: float = 0.8,
     ) -> None:
         self.model_path = model_path
+        # GPEN-BFR runs at 256, GFPGAN at 512. Measured on this RTX 2060:
+        # GFPGAN 83.0 ms vs GPEN-256 31.4 ms — 2.6x faster, but visibly
+        # softer (less crisp eyes and skin detail), which is the exact
+        # quality this stage exists to recover. Offered as a speed option,
+        # not as the default.
+        self.size = 256 if "GPEN-BFR-256" in model_path.name else 512
         self.use_gpu = use_gpu
         self.blend = blend
+        # GPEN-256 is TensorRT-fp16 safe; GFPGAN is not (fp16 returns a blank
+        # image) and resolves to CUDA inside providers_for().
+        self.use_tensorrt = True
         self._session = None
         self._input_name: str | None = None
         self._output_name: str | None = None
@@ -77,8 +92,11 @@ class FaceEnhancer:
 
         import onnxruntime
 
+        from shared.utils.providers import providers_for
+
+        role = "enhancer_gpen256" if self.size == 256 else "enhancer_gfpgan"
         providers = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            providers_for(role, use_tensorrt=self.use_tensorrt)
             if self.use_gpu
             else ["CPUExecutionProvider"]
         )
@@ -95,7 +113,10 @@ class FaceEnhancer:
         self._output_name = session.get_outputs()[0].name
         self.actual_providers = session.get_providers()
 
-        if self.use_gpu and "CUDAExecutionProvider" not in self.actual_providers:
+        if self.use_gpu and not any(
+            p in self.actual_providers
+            for p in ("CUDAExecutionProvider", "TensorrtExecutionProvider")
+        ):
             raise FaceEnhancerError(
                 f"Requested CUDA for face enhancement but got {self.actual_providers}. "
                 "See services/face/detector.py's identical check for the known cause."
@@ -104,12 +125,16 @@ class FaceEnhancer:
     def warm_up(self) -> None:
         if self._session is None:
             raise FaceEnhancerError("FaceEnhancer.warm_up() called before load().")
-        dummy = np.zeros((1, 3, ENHANCER_SIZE, ENHANCER_SIZE), dtype=np.float32)
+        dummy = np.zeros((1, 3, self.size, self.size), dtype=np.float32)
         self._session.run([self._output_name], {self._input_name: dummy})
 
-    def _run_model(self, face_512_bgr: np.ndarray) -> np.ndarray:
-        """GFPGAN expects RGB, CHW, normalized to [-1, 1]."""
-        rgb = cv2.cvtColor(face_512_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    def _run_model(self, face_bgr: np.ndarray) -> np.ndarray:
+        """Both supported enhancers take RGB, CHW, normalized to [-1, 1]."""
+        if face_bgr.shape[0] != self.size:
+            face_bgr = cv2.resize(
+                face_bgr, (self.size, self.size), interpolation=cv2.INTER_LANCZOS4
+            )
+        rgb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         rgb = (rgb - 0.5) / 0.5
         blob = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
 

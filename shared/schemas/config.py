@@ -32,7 +32,11 @@ class FaceConfig(BaseModel):
     fp16: bool = True
     detection_interval: int = Field(default=3, ge=1)
     mode: Literal["swap", "reenact"] = "swap"
-    enhancement: Literal["off", "low", "high"] = "off"
+    # off  = no restoration (fastest, softest face)
+    # fast = GPEN-BFR-256, 2.6x quicker than GFPGAN but visibly softer
+    # low  = GFPGAN blended at 50%
+    # high = GFPGAN blended at 85% (sharpest)
+    enhancement: Literal["off", "fast", "low", "high"] = "off"
     # "contour" masks to the real face outline (106-point hull), leaving your
     # own hair/ears/background untouched; "square" pastes the whole aligned
     # crop, which also covers hair with the model's blurry approximation of it.
