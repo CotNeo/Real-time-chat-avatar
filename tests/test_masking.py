@@ -86,3 +86,21 @@ def test_color_match_returns_source_unchanged_for_empty_mask():
     reference = np.full((32, 32, 3), 20, dtype=np.uint8)
     out = match_color(source, reference, np.zeros((32, 32), dtype=np.float32))
     assert np.array_equal(out, source)
+
+
+def test_occlusion_and_contour_masks_multiply_to_exclude_both():
+    """The engine combines the two masks by multiplication: a pixel is painted
+    only if it is BOTH inside the face contour AND not covered by something.
+    This guards the combination rule itself, which is easy to get wrong (an
+    OR/max would paint over a hand)."""
+    contour = np.zeros((64, 64), dtype=np.float32)
+    contour[16:48, 16:48] = 1.0  # face region
+
+    visible = np.ones((64, 64), dtype=np.float32)
+    visible[30:40, 20:44] = 0.0  # a "hand" across part of the face
+
+    combined = contour * visible
+
+    assert combined[20, 20] == 1.0  # face, unobstructed -> painted
+    assert combined[35, 30] == 0.0  # face, but covered -> NOT painted
+    assert combined[5, 5] == 0.0  # outside the face -> not painted

@@ -58,3 +58,50 @@ def test_session_with_embedding_but_zero_accepted_images_is_not_usable():
         created_at=time.time(),
     )
     assert session.is_usable is False
+
+
+def test_gender_summary_reports_mixed_when_references_disagree():
+    """Averaging embeddings across genders yields an identity that reads as
+    neither; the UI needs to be able to warn about it."""
+    session = IdentitySession(
+        session_id="s",
+        accepted_images=[
+            ReferenceImageResult(filename="a.jpg", accepted=True, gender="female"),
+            ReferenceImageResult(filename="b.jpg", accepted=True, gender="male"),
+        ],
+        rejected_images=[],
+        aggregated_embedding=object(),
+        created_at=0.0,
+    )
+    assert session.gender_summary == "mixed"
+
+
+def test_gender_summary_reports_the_shared_gender():
+    session = IdentitySession(
+        session_id="s",
+        accepted_images=[
+            ReferenceImageResult(filename="a.jpg", accepted=True, gender="female"),
+            ReferenceImageResult(filename="b.jpg", accepted=True, gender="female"),
+        ],
+        rejected_images=[],
+        aggregated_embedding=object(),
+        created_at=0.0,
+    )
+    assert session.gender_summary == "female"
+
+
+def test_gender_summary_ignores_rejected_images():
+    """A rejected photo contributes nothing to the identity, so it must not
+    trigger a mixed-gender warning either."""
+    session = IdentitySession(
+        session_id="s",
+        accepted_images=[
+            ReferenceImageResult(filename="a.jpg", accepted=True, gender="female")
+        ],
+        rejected_images=[
+            ReferenceImageResult(filename="b.jpg", accepted=False, gender="male")
+        ],
+        aggregated_embedding=object(),
+        created_at=0.0,
+    )
+    assert session.gender_summary == "female"

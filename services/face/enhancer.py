@@ -82,7 +82,14 @@ class FaceEnhancer:
             if self.use_gpu
             else ["CPUExecutionProvider"]
         )
-        session = onnxruntime.InferenceSession(str(self.model_path), providers=providers)
+        from shared.utils.onnx_errors import describe_load_failure
+
+        try:
+            session = onnxruntime.InferenceSession(
+                str(self.model_path), providers=providers
+            )
+        except Exception as e:  # noqa: BLE001 - re-raised with an actionable message
+            raise FaceEnhancerError(describe_load_failure("the face enhancer", e)) from e
         self._session = session
         self._input_name = session.get_inputs()[0].name
         self._output_name = session.get_outputs()[0].name

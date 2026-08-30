@@ -22,9 +22,10 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from services.face.detector import FaceDetector, FaceDetectorError
 from services.face.engine import FaceEngineError
 from services.face.enhancer import FaceEnhancer, FaceEnhancerError
-from services.face.masking import FaceMaskerError, LandmarkMasker
+from services.face.masking import FaceMaskerError, LandmarkMasker, OcclusionMasker
 from services.face.identity import (
     MAX_REFERENCE_IMAGES,
+    GenderEstimator,
     IdentityEncoder,
     IdentityEncoderError,
     build_identity_session,
@@ -59,8 +60,10 @@ _ENHANCEMENT_BLEND = {"low": 0.5, "high": 0.85}
 _camera_stream: ThreadedCameraStream | None = None
 _detector: FaceDetector | None = None
 _encoder: IdentityEncoder | None = None
+_gender_estimator: GenderEstimator | None = None
 _enhancer: FaceEnhancer | None = None
 _masker: LandmarkMasker | None = None
+_occluder: OcclusionMasker | None = None
 _swap_engine: FaceSwapEngine | None = None
 _last_detect_ms: float = 0.0
 _identity_session: IdentitySession | None = None
@@ -108,6 +111,17 @@ def _startup() -> None:
         _encoder = None
         log.error("identity_encoder_load_failed", error=str(e))
 
+    global _gender_estimator
+    try:
+        estimator = GenderEstimator()
+        estimator.load()
+        _gender_estimator = estimator
+        log.info("gender_estimator_loaded")
+    except IdentityEncoderError as e:
+        # Advisory feature only — never block uploads on it.
+        _gender_estimator = None
+        log.error("gender_estimator_load_failed", error=str(e))
+
     global _enhancer
     if config.face.enhancement != "off":
         try:
@@ -141,12 +155,28 @@ def _startup() -> None:
         _masker = None
         log.info("landmark_masker_disabled", reason="face.mask=square in config")
 
+    global _occluder
+    if config.face.occlusion_mask:
+        try:
+            occluder = OcclusionMasker()
+            occluder.load()
+            occluder.warm_up()
+            _occluder = occluder
+            log.info("occlusion_masker_loaded", providers=occluder.actual_providers)
+        except FaceMaskerError as e:
+            _occluder = None
+            log.error("occlusion_masker_load_failed", error=str(e))
+    else:
+        _occluder = None
+        log.info("occlusion_masker_disabled", reason="face.occlusion_mask=false")
+
     if _detector is not None:
         try:
             swap_engine = FaceSwapEngine(detector=_detector, enhancer=_enhancer)
             swap_engine.load()
             swap_engine.warm_up()
             swap_engine.masker = _masker
+            swap_engine.occluder = _occluder
             swap_engine.color_match = config.face.color_match
             _swap_engine = swap_engine
             log.info(
@@ -154,6 +184,7 @@ def _startup() -> None:
                 providers=swap_engine.actual_providers,
                 mask=config.face.mask,
                 color_match=config.face.color_match,
+                occlusion_mask=_occluder is not None,
             )
         except FaceEngineError as e:
             _swap_engine = None
@@ -189,6 +220,7 @@ def health() -> dict:
         "face_mask": config.face.mask,
         "landmark_masker_loaded": _masker is not None,
         "color_match": config.face.color_match,
+        "occlusion_mask_loaded": _occluder is not None,
         "session_active": _session_active,
         "config": {
             "video": config.video.model_dump(),
@@ -224,7 +256,8 @@ def _reference_result_to_dict(result) -> dict:
         "filename": result.filename,
         "accepted": result.accepted,
         "problems": [p.value for p in result.problems],
-        "quality_score": result.quality_score,
+        "verdict": result.verdict,
+        "gender": result.gender,
     }
 
 
@@ -237,6 +270,7 @@ def _session_summary(session: IdentitySession | None) -> dict:
         "usable": session.is_usable,
         "accepted_images": [_reference_result_to_dict(r) for r in session.accepted_images],
         "rejected_images": [_reference_result_to_dict(r) for r in session.rejected_images],
+        "gender": session.gender_summary,
         "created_at": session.created_at,
     }
 
@@ -271,7 +305,7 @@ async def upload_identity(images: list[UploadFile] = File(...)) -> dict:
         image = cv2.imdecode(array, cv2.IMREAD_COLOR) if array.size else None
         decoded.append((upload.filename or "unnamed", image))
 
-    session = build_identity_session(decoded, _detector, _encoder)
+    session = build_identity_session(decoded, _detector, _encoder, _gender_estimator)
     _identity_session = session
     log.info(
         "identity_session_built",
@@ -418,8 +452,16 @@ def index() -> str:
       button:disabled { background: #555; cursor: default; }
       pre { background: #000; padding: 1rem; border-radius: 6px; overflow-x: auto;
             font-size: 0.85rem; white-space: pre-wrap; }
-      .accepted { color: #4d8; }
-      .rejected { color: #e66; }
+      .summary { margin-top: 1rem; line-height: 1.6; }
+      .thumbs { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+      .thumb { width: 108px; text-align: center; font-size: 0.75rem; line-height: 1.3; }
+      .thumb img { width: 108px; height: 108px; object-fit: cover;
+                   border-radius: 6px; border: 1px solid #333; display: block;
+                   margin-bottom: 0.35rem; }
+      .ok { color: #4d8; font-weight: 600; }
+      .bad { color: #e66; font-weight: 600; }
+      .muted { color: #999; }
+      .warn { color: #fb4; margin-top: 0.5rem; }
     </style>
     </head>
     <body>
@@ -436,14 +478,15 @@ def index() -> str:
       </p>
 
       <div class="panel">
-        <h3>Reference identity (Milestone 4)</h3>
-        <p class="note">Upload 1-5 reference photos. Each is validated (face
-        found? exactly one? sharp enough? not too small?) and never stored —
-        only a derived embedding survives the request.</p>
+        <h3>Reference identity</h3>
+        <p class="note">Upload 1-5 photos of the face you want to wear. Each is
+        checked and never saved to disk — only a numeric fingerprint of the face
+        is kept, and only while the app is running.</p>
         <input type="file" id="refFiles" accept="image/*" multiple />
         <button id="refUpload">Upload</button>
-        <button id="refClear">Clear session</button>
-        <pre id="refResult">No identity session yet.</pre>
+        <button id="refClear">Clear</button>
+        <div id="refSummary" class="summary"></div>
+        <div id="refThumbs" class="thumbs"></div>
       </div>
 
       <div class="panel">
@@ -454,21 +497,87 @@ def index() -> str:
       </div>
 
       <script>
+        // Thumbnails are rendered from the browser's own File objects. The
+        // server never stores an uploaded photo, so it has none to serve back —
+        // keeping the preview client-side preserves that property.
+        let lastFiles = [];
+
+        function renderIdentity(data) {
+          const summary = document.getElementById('refSummary');
+          const thumbs = document.getElementById('refThumbs');
+          thumbs.innerHTML = '';
+
+          if (!data.active) {
+            summary.innerHTML = '<span class="muted">No photos uploaded yet.</span>';
+            return;
+          }
+
+          const all = [...(data.accepted_images || []), ...(data.rejected_images || [])];
+          const okCount = (data.accepted_images || []).length;
+
+          let head = data.usable
+            ? `<span class="ok">Ready</span> — using ${okCount} photo${okCount === 1 ? '' : 's'}`
+            : `<span class="bad">Not ready</span> — no usable photo yet`;
+
+          if (data.gender === 'mixed') {
+            head += `<div class="warn">These photos are a mix of male and female faces.
+              Averaging them makes the result look like neither. Use photos of one
+              person, or at least one consistent gender.</div>`;
+          } else if (data.gender) {
+            head += `<div class="muted">These photos read as <b>${data.gender}</b>,
+              so that is how the swapped face will look.</div>`;
+          }
+          summary.innerHTML = head;
+
+          const byName = {};
+          all.forEach(r => { byName[r.filename] = r; });
+
+          lastFiles.forEach(file => {
+            const r = byName[file.name];
+            const card = document.createElement('div');
+            card.className = 'thumb';
+            const img = document.createElement('img');
+            img.src = URL.createObjectURL(file);
+            img.onload = () => URL.revokeObjectURL(img.src);
+            card.appendChild(img);
+            const label = document.createElement('div');
+            if (!r) {
+              label.className = 'muted';
+              label.textContent = 'Not processed';
+            } else if (r.accepted) {
+              label.className = 'ok';
+              label.textContent = r.verdict || 'Good';
+            } else {
+              label.className = 'bad';
+              label.textContent = r.verdict || 'Unusable';
+            }
+            card.appendChild(label);
+            thumbs.appendChild(card);
+          });
+        }
+
         async function refreshIdentity() {
           const r = await fetch('/identity');
-          document.getElementById('refResult').textContent = JSON.stringify(await r.json(), null, 2);
+          renderIdentity(await r.json());
         }
         document.getElementById('refUpload').onclick = async () => {
           const files = document.getElementById('refFiles').files;
-          if (!files.length) { alert('Choose 1-5 images first.'); return; }
+          if (!files.length) { alert('Choose 1-5 photos first.'); return; }
+          lastFiles = Array.from(files);
           const form = new FormData();
           for (const f of files) form.append('images', f);
           const r = await fetch('/identity', { method: 'POST', body: form });
           const data = await r.json();
-          document.getElementById('refResult').textContent = JSON.stringify(data, null, 2);
+          if (!r.ok) {
+            document.getElementById('refSummary').innerHTML =
+              `<span class="bad">${data.detail || 'Upload failed'}</span>`;
+            return;
+          }
+          renderIdentity(data);
         };
         document.getElementById('refClear').onclick = async () => {
           await fetch('/identity', { method: 'DELETE' });
+          lastFiles = [];
           await refreshIdentity();
         };
         document.getElementById('sessionStart').onclick = async () => {

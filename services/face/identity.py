@@ -31,6 +31,29 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RECOGNITION_MODEL_PATH = (
     REPO_ROOT / "models" / "face" / "models" / "buffalo_l" / "w600k_r50.onnx"
 )
+GENDERAGE_MODEL_PATH = (
+    REPO_ROOT / "models" / "face" / "models" / "buffalo_l" / "genderage.onnx"
+)
+
+
+# Plain-language verdicts for the UI (Section 14 asks for reference thumbnails,
+# and a bare 0-1 number is not something a person can act on when choosing
+# which photo to swap out).
+def _verdict_for(quality: float) -> str:
+    if quality >= 0.85:
+        return "Good"
+    if quality >= 0.70:
+        return "Usable"
+    return "Weak — try a sharper, more front-facing photo"
+
+
+PROBLEM_EXPLANATIONS = {
+    "no_face_detected": "No face found in this photo",
+    "multiple_faces": "More than one face — use a photo with just the person",
+    "resolution_too_low": "Photo is too small — use a larger one",
+    "too_blurry": "Too blurry — use a sharper photo",
+    "excessive_occlusion": "Face is turned away or partly covered",
+}
 
 # Thresholds are deliberately simple, documented heuristics for an MVP, not
 # trained classifiers — Section 31: don't over-engineer. Revisit with real
@@ -43,6 +66,62 @@ MAX_REFERENCE_IMAGES = 5
 
 class IdentityEncoderError(RuntimeError):
     """Actionable message (Section 20)."""
+
+
+class GenderEstimator:
+    """Reports the apparent gender of a reference face.
+
+    Not a control knob — face swap has no separate gender setting, the
+    apparent gender rides along with whichever identity is uploaded. This
+    exists so the UI can tell the user what their chosen photos will actually
+    produce, and warn when a set mixes genders (which averages into a muddled
+    identity). Uses `genderage.onnx` from the buffalo_l pack already
+    downloaded — no extra model.
+    """
+
+    def __init__(self, model_path: Path = GENDERAGE_MODEL_PATH, use_gpu: bool = True) -> None:
+        self.model_path = model_path
+        self.use_gpu = use_gpu
+        self._model = None
+
+    def load(self) -> None:
+        if not self.model_path.exists():
+            raise IdentityEncoderError(
+                f"Gender model not found at {self.model_path}.\n"
+                "Run: python scripts/models.py install face-detection"
+            )
+        from shared.utils.cuda_env import ensure_onnxruntime_cuda_libs
+
+        if self.use_gpu:
+            ensure_onnxruntime_cuda_libs()
+        from insightface.model_zoo import model_zoo
+
+        providers = (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if self.use_gpu
+            else ["CPUExecutionProvider"]
+        )
+        model = model_zoo.get_model(str(self.model_path), providers=providers)
+        if model is None:
+            raise IdentityEncoderError(f"Could not load {self.model_path}.")
+        model.prepare(ctx_id=0 if self.use_gpu else -1)
+        self._model = model
+
+    def estimate(self, image_bgr, face) -> str | None:
+        if self._model is None:
+            return None
+        from insightface.app.common import Face
+
+        try:
+            obj = Face(
+                bbox=np.array(face.bbox, dtype=np.float32),
+                kps=face.landmarks,
+                det_score=face.score,
+            )
+            gender, _age = self._model.get(image_bgr, obj)
+            return "female" if int(gender) == 0 else "male"
+        except Exception:  # noqa: BLE001 - advisory only, never fail the upload
+            return None
 
 
 class IdentityEncoder:
@@ -124,6 +203,7 @@ def process_reference_image(
     image_bgr: np.ndarray | None,
     detector: FaceDetector,
     encoder: IdentityEncoder,
+    gender_estimator: "GenderEstimator | None" = None,
 ) -> ReferenceImageResult:
     """Runs the full per-image pipeline (Section 5's validation checklist).
     Never raises for a bad image — a rejected image is a normal, expected
@@ -132,6 +212,7 @@ def process_reference_image(
         return ReferenceImageResult(
             filename=filename, accepted=False,
             problems=[ReferenceImageProblem.NO_FACE_DETECTED],
+            verdict=PROBLEM_EXPLANATIONS["no_face_detected"],
         )
 
     h, w = image_bgr.shape[:2]
@@ -139,6 +220,7 @@ def process_reference_image(
         return ReferenceImageResult(
             filename=filename, accepted=False,
             problems=[ReferenceImageProblem.RESOLUTION_TOO_LOW],
+            verdict=PROBLEM_EXPLANATIONS["resolution_too_low"],
         )
 
     faces, _ = detector.detect(image_bgr)
@@ -146,11 +228,13 @@ def process_reference_image(
         return ReferenceImageResult(
             filename=filename, accepted=False,
             problems=[ReferenceImageProblem.NO_FACE_DETECTED],
+            verdict=PROBLEM_EXPLANATIONS["no_face_detected"],
         )
     if len(faces) > 1:
         return ReferenceImageResult(
             filename=filename, accepted=False,
             problems=[ReferenceImageProblem.MULTIPLE_FACES],
+            verdict=PROBLEM_EXPLANATIONS["multiple_faces"],
         )
 
     face = faces[0]
@@ -165,13 +249,26 @@ def process_reference_image(
         problems.append(ReferenceImageProblem.TOO_BLURRY)
 
     if problems:
-        return ReferenceImageResult(filename=filename, accepted=False, problems=problems)
+        return ReferenceImageResult(
+            filename=filename,
+            accepted=False,
+            problems=problems,
+            verdict=PROBLEM_EXPLANATIONS.get(problems[0].value, "Unusable"),
+        )
 
     embedding = encoder.encode(aligned)
     normalized = embedding / (np.linalg.norm(embedding) + 1e-8)
     quality_score = min(1.0, face.score)
+    gender = (
+        gender_estimator.estimate(image_bgr, face) if gender_estimator is not None else None
+    )
     return ReferenceImageResult(
-        filename=filename, accepted=True, quality_score=quality_score, embedding=normalized
+        filename=filename,
+        accepted=True,
+        quality_score=quality_score,
+        embedding=normalized,
+        verdict=_verdict_for(quality_score),
+        gender=gender,
     )
 
 
@@ -179,6 +276,7 @@ def build_identity_session(
     images: list[tuple[str, np.ndarray | None]],
     detector: FaceDetector,
     encoder: IdentityEncoder,
+    gender_estimator: "GenderEstimator | None" = None,
 ) -> IdentitySession:
     """Section 5's full pipeline entrypoint: Upload -> Process -> Session
     Identity. `images` is (filename, decoded BGR array or None if decode
@@ -188,7 +286,9 @@ def build_identity_session(
     rejected: list[ReferenceImageResult] = []
 
     for filename, image_bgr in images[:MAX_REFERENCE_IMAGES]:
-        result = process_reference_image(filename, image_bgr, detector, encoder)
+        result = process_reference_image(
+            filename, image_bgr, detector, encoder, gender_estimator
+        )
         (accepted if result.accepted else rejected).append(result)
 
     aggregated = None

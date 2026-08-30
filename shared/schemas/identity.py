@@ -31,6 +31,14 @@ class ReferenceImageResult:
     embedding: object | None = None  # np.ndarray once computed; typed loosely to
     # avoid importing numpy into a schemas module that other layers may want to
     # keep dependency-light.
+    # Plain-language outcome for the UI. A raw 0-1 score tells someone
+    # choosing photos nothing actionable; "Good" / "Usable" / a named problem
+    # does.
+    verdict: str | None = None
+    # Apparent gender of the reference face ("female"/"male"/None). Reported
+    # because averaging embeddings across genders produces a muddled identity
+    # — the UI warns when a set is mixed.
+    gender: str | None = None
 
 
 @dataclass
@@ -50,6 +58,19 @@ class IdentitySession:
     @property
     def is_usable(self) -> bool:
         return self.aggregated_embedding is not None and len(self.accepted_images) > 0
+
+    @property
+    def gender_summary(self) -> str | None:
+        """"female" / "male" when the accepted references agree, "mixed" when
+        they don't. A mixed set averages incompatible faces together and the
+        result reads as neither — worth telling the user rather than letting
+        them wonder why the output looks off."""
+        genders = {r.gender for r in self.accepted_images if r.gender}
+        if not genders:
+            return None
+        if len(genders) > 1:
+            return "mixed"
+        return genders.pop()
 
 
 @dataclass

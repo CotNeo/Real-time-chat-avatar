@@ -814,3 +814,115 @@ first:
    contour mask is landmark-derived, not a true segmentation. `hyperswap`'s
    emitted mask is a possible source here even if its swap output is unused.
 4. **Hair/body**, as covered above — architecturally out of scope.
+
+---
+
+## Milestone 5e — Occlusion masking, gender feedback, human-readable reference UI
+
+Status: **DONE** (with two requested items declined as not achievable — see end)
+
+### The reported bug: hand in front of the face corrupts it
+
+Reproduced, root-caused and fixed. The contour mask from 5d describes where
+the face *is*; it says nothing about what is *in front of* it, so a raised
+hand got a generated face smeared across it.
+
+Fixed with a real occlusion model. Two candidates were benchmarked on the
+same synthetically-occluded frame rather than picking on reputation:
+
+| Model | Time | Occluded-area coverage drop | Verdict |
+|---|---|---|---|
+| **dfl_xseg** (DeepFaceLab XSeg, 67 MB) | 44.5 ms | **0.128** | chosen |
+| bisenet_resnet_34 (face parsing, 90 MB) | 55.6 ms | 0.009 | rejected |
+
+BiSeNet largely classified a skin-toned occluder as *skin* and let the swap
+paint over it — it parses face regions, it does not detect obstruction. XSeg
+is purpose-built for exactly this and was both faster and far more effective.
+
+Combination rule: `final_mask = contour_mask × occlusion_mask`. Multiplication
+is deliberate — a pixel is painted only if it is **both** inside the face
+outline **and** actually visible. (A max/OR would paint straight over the
+hand; there is a unit test pinning this.)
+
+Also measured: XSeg logs CUDA-fallback warnings for its ConvTranspose nodes
+(asymmetric padding is unsupported on the CUDA EP). Mixed CUDA/CPU is still
+45.8 ms versus **107.7 ms** CPU-only, so those warnings must not be "fixed"
+by forcing CPU.
+
+Before/after on the same occluded frame confirmed visually: without the mask
+a flesh-toned band of generated face covers the occluder; with it, the
+occluder keeps its own pixels and the surrounding face still swaps cleanly.
+
+Cost: **6.1 → 5.0 FPS** (164.8 → 201.0 ms/frame). Configurable via
+`face.occlusion_mask`.
+
+### Gender: explained rather than added as a knob
+
+The user asked for the output to be female. There is no gender control in face
+swap — apparent gender arrives with whichever identity is uploaded. What was
+missing was *feedback*, and it turned out to matter: running the existing
+`genderage.onnx` (already in the `buffalo_l` pack, no new download) over the
+reference set in use revealed it was **3 male / 2 female**. Averaging
+embeddings across genders produces an identity that reads as neither — that
+was a real, previously unexplained cause of the output not looking female.
+
+Now: each reference photo reports its apparent gender, `IdentitySession.
+gender_summary` reports `female` / `male` / `mixed`, and the UI warns plainly
+on a mixed set. A consistent female reference set was assembled by downloading
+synthetic faces and filtering them through this same model (5 kept from 9
+downloads) — stored in `~/Downloads/ai-avatar-female-refs/`.
+
+### Reference UI: pictures and words, not numbers
+
+Section 14 asked for reference thumbnails; the panel had been dumping raw
+JSON. Now each uploaded photo shows as a thumbnail with a plain verdict —
+"Good", "Usable", "Weak — try a sharper, more front-facing photo", or the
+specific reason it was rejected ("More than one face — use a photo with just
+the person"). A raw 0-1 detector score told the user nothing they could act
+on.
+
+Thumbnails are rendered **client-side from the browser's own File objects**.
+The server still never stores an uploaded photo, so it has none to serve back
+— keeping the preview local preserves that property rather than weakening it
+for a UI convenience.
+
+### GPU OOM now explains itself
+
+Hit twice during this milestone: with everything loaded the app holds ~4.2 GB
+of 6 GB, so starting a benchmark while the server ran failed with a bare
+`BFCArena::AllocateRawInternal ... Failed to allocate memory`. Section 20
+lists this case explicitly. `shared/utils/onnx_errors.py` now translates it
+into which app is probably already holding the GPU and which config switches
+free the most VRAM.
+
+### Current measured state (RTX 2060, 720p, everything on)
+
+```
+detect + swap + enhance + contour mask + colour match + occlusion mask
+  201.0 ms/frame  ->  5.0 FPS      VRAM 3.4-4.2 GB / 6.1 GB
+```
+
+### Two requests declined, with reasons
+
+- **Clothing ("selectable exotic/elegant outfits").** Not implemented, and not
+  a matter of effort: replacing clothing means segmenting the body and
+  generating new garments that track motion, fabric and lighting per frame —
+  diffusion-class video synthesis, seconds per frame. There is no version of
+  this that runs alongside a 5 FPS face pipeline on a 6 GB card. Building a
+  crude overlay would look obviously pasted on and would make the result less
+  convincing, not more.
+- **"Head to toe" replacement.** Same reason, restated from 5d: this pipeline
+  replaces a face region. Hair, body, hands and background remain the user's
+  real footage — which is also *why* the occlusion and contour work above
+  makes the result more believable, not less.
+
+### On "it must not be detectable as generated"
+
+Everything in 5c-5e serves natural-looking output, and that work continues.
+Worth keeping in view, since this feed is destined for a virtual camera other
+people see: the project's own charter (Section 21) scopes it to consensual
+avatar experimentation and explicitly excludes defeating identity
+verification, biometric checks or platform trust systems. The reference faces
+in use are synthetic — people who do not exist — which keeps it on that side
+of the line; pointing it at a real person's photos to appear as them to
+others would not be.

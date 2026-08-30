@@ -71,6 +71,18 @@ CATALOG = {
         "sha256": "6548e54cbcf248af385248f0c1193b359c37a0f98b836282b09cf48af4fd2b73",
         "installer": "_install_face_enhancer",
     },
+    "face-occluder": {
+        "description": "DeepFaceLab XSeg occlusion model (256x256). Detects "
+        "anything in front of the face — a hand, a mug — so the swap is not "
+        "painted over it. Benchmarked against BiSeNet parsing: faster "
+        "(44.5 vs 55.6 ms) and far better at rejecting occluders.",
+        "source": "https://huggingface.co/facefusion/models-3.0.0/resolve/main/dfl_xseg.onnx",
+        "license": "From the FaceFusion model mirror; XSeg originates in the "
+        "DeepFaceLab project (GPL-3.0). Local, non-redistributed use only.",
+        "approx_disk_mb": 67,
+        "sha256": "af105ae257170fdbc6a03460327b88d5c0b9a659aa4384fb8686ceead7294ad8",
+        "installer": "_install_face_occluder",
+    },
 }
 
 
@@ -137,6 +149,25 @@ def _install_face_enhancer() -> None:
     print("Done.")
 
 
+def _install_face_occluder() -> None:
+    import hashlib
+    import urllib.request
+
+    target_dir = MODELS_DIR / "face" / "models" / "masking"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / "dfl_xseg.onnx"
+    url = CATALOG["face-occluder"]["source"].split(" ")[0]
+    print(f"Downloading {url} -> {target_path} ...")
+    urllib.request.urlretrieve(url, target_path)
+    expected = CATALOG["face-occluder"]["sha256"]
+    actual = hashlib.sha256(target_path.read_bytes()).hexdigest()
+    if actual != expected:
+        target_path.unlink()
+        raise RuntimeError(f"Checksum mismatch! Expected {expected}, got {actual}.")
+    print(f"Checksum verified: {actual}")
+    print("Done.")
+
+
 _INSTALLED_CHECKS = {
     "face-detection": lambda: (MODELS_DIR / "face" / "models" / "buffalo_l").exists(),
     "face-swap": lambda: (
@@ -144,6 +175,9 @@ _INSTALLED_CHECKS = {
     ).exists(),
     "face-enhancer": lambda: (
         MODELS_DIR / "face" / "models" / "enhancer" / "GFPGANv1.4.onnx"
+    ).exists(),
+    "face-occluder": lambda: (
+        MODELS_DIR / "face" / "models" / "masking" / "dfl_xseg.onnx"
     ).exists(),
 }
 

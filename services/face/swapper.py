@@ -39,7 +39,7 @@ import cv2
 
 if TYPE_CHECKING:
     from services.face.enhancer import FaceEnhancer
-    from services.face.masking import LandmarkMasker
+    from services.face.masking import LandmarkMasker, OcclusionMasker
 from types import SimpleNamespace
 
 import numpy as np
@@ -95,6 +95,7 @@ class FaceSwapEngine(FaceEngine):
         # colour transfer so the generated face carries the room's lighting
         # instead of the reference photo's.
         self.masker: "LandmarkMasker | None" = None
+        self.occluder: "OcclusionMasker | None" = None
         self.color_match = True
         self._swapper = None
         self._source_embedding: np.ndarray | None = None
@@ -301,6 +302,15 @@ class FaceSwapEngine(FaceEngine):
             dense = self.masker.landmarks_106(frame, bbox, landmarks)
             if dense is not None:
                 face_mask = self.masker.build_mask(dense, affine_matrix, work_size)
+
+        # Occlusion mask: multiply in, so anything held in front of the face
+        # (a hand, a mug) keeps its real pixels instead of having a generated
+        # face painted over it. Multiplication is the right combination here —
+        # a pixel must be BOTH inside the face contour AND actually visible.
+        if self.occluder is not None:
+            visible = self.occluder.mask_for(aligned, work_size)
+            if visible is not None:
+                face_mask = visible if face_mask is None else face_mask * visible
 
         # Colour transfer, inside the mask, so the generated face picks up the
         # room's lighting instead of the reference photo's. Done after

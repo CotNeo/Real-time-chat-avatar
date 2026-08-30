@@ -39,6 +39,20 @@ face:
       provenance discussion and the user's explicit decision to proceed.
     sha256: e4a3f08c753cb72d04e10aa0f7dbe3deebbf39567d4ead6dce08e98aa49e16af
     approx_disk_mb: 529
+  face-occluder:
+    backend: onnx
+    path: models/face/models/masking/dfl_xseg.onnx
+    source: https://huggingface.co/facefusion/models-3.0.0/resolve/main/dfl_xseg.onnx
+    license: >
+      From the FaceFusion model mirror; XSeg originates in DeepFaceLab
+      (GPL-3.0). Local, non-redistributed use only.
+    sha256: af105ae257170fdbc6a03460327b88d5c0b9a659aa4384fb8686ceead7294ad8
+    approx_disk_mb: 67
+    measured_cost_ms: ~46 (mixed CUDA/CPU; 107.7 CPU-only)
+    alternatives_rejected: >
+      bisenet_resnet_34 was slower (55.6 vs 44.5 ms) and barely rejected a
+      skin-toned occluder (coverage drop 0.009 vs XSeg's 0.128) — it parses
+      face regions rather than detecting obstruction.
   face-enhancer:
     backend: onnx
     path: models/face/models/enhancer/GFPGANv1.4.onnx

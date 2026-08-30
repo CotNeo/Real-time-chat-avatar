@@ -40,6 +40,9 @@ class FaceConfig(BaseModel):
     # Rescale the generated face's colour statistics to the live frame's, so
     # it carries the room's lighting instead of the reference photo's.
     color_match: bool = True
+    # Detect things in front of the face (a hand, a mug) and leave their real
+    # pixels alone instead of painting the swap over them. Costs ~46 ms/frame.
+    occlusion_mask: bool = True
 
 
 class VoiceConfig(BaseModel):

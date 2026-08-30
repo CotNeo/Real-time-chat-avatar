@@ -35,6 +35,10 @@ face:
   #           the swap model's blurry approximation of it.
   mask: contour            # contour | square
   color_match: true        # match the generated face to the room's lighting
+  # Keeps your hand (or anything else) in front of your face from having a
+  # generated face smeared over it. Costs ~46 ms/frame — turn off only if you
+  # need the frame rate more than you need that fixed.
+  occlusion_mask: true
 
 voice:
   engine: null             # set once Milestone 8/9 pick a default (rvc | seed-vc)
