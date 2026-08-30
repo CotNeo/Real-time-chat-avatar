@@ -1362,3 +1362,87 @@ nothing end to end, and this is exactly the kind of quietly-meaningless result
 that the video benchmarks produced twice before being made to refuse it.
 
 Next: Milestone 8 — voice conversion, with a ~120 ms budget to fit inside.
+
+---
+
+## Milestone 8 — Voice conversion (first engine)
+
+Status: **DONE** — a working, measured speech-to-speech engine. Neural voice
+cloning is deferred, with reasons.
+
+### Why not Seed-VC or RVC first
+
+Both were investigated before writing any code:
+
+- **Seed-VC** is zero-shot (no per-voice training) and attractive, but pins
+  `torch==2.4.0` and `numpy==1.26.4`. This project runs torch 2.13 behind a
+  carefully verified TensorRT/CUDA setup for the face pipeline; installing
+  those pins would break working code. It also documents ~430 ms end-to-end on
+  a comparable GPU, which lands in Section 8's "poor for conversation" band
+  once Milestone 7's 80 ms device baseline is added.
+- **RVC** needs a trained model per voice. The pretrained models circulating
+  publicly are overwhelmingly trained on specific real people — celebrities,
+  streamers — without consent. That is the voice equivalent of using a real
+  person's face, which is the line this project stays on the right side of by
+  using synthetic faces throughout.
+
+`services/voice/pitch_formant.py` clones nobody: it reshapes the operator's own
+voice, so there is no model file whose provenance could be in question. Neural
+VC remains viable later in its own process/venv — the `VoiceEngine` interface
+exists precisely so that swap costs nothing structurally.
+
+### What it does
+
+Perceived vocal gender rests on two largely independent properties: **pitch**
+(adult male ~85-155 Hz vs female ~165-255 Hz) and **formants** (vocal-tract
+resonances; a shorter tract sits ~15-20% higher). Shifting pitch alone is the
+classic "chipmunk" error — a raised fundamental over an unchanged vocal tract
+reads as a sped-up recording, not a different speaker. Both are shifted
+independently: formants by warping the magnitude spectrum's frequency axis,
+pitch by phase-vocoder time-stretch followed by resampling.
+
+Section 7's preservation requirements hold structurally rather than by effort —
+words, timing, speaking rate, pauses, emotion and intonation all survive
+because the signal is only transposed, never resynthesised or re-timed.
+
+### Measured (synthetic 120 Hz voiced tone, 20 ms chunks)
+
+| Preset | Output f0 | Spectral centroid | ms per 20 ms chunk | Realtime factor |
+|---|---|---|---|---|
+| source | 120.3 Hz | 768 Hz | — | — |
+| female-04 | 166.7 Hz | 1266 Hz | 1.35 | 14.8x |
+| female-01 | 181.8 Hz | 1258 Hz | 1.38 | 14.5x |
+| female-02 | 205.1 Hz | 1446 Hz | 1.38 | 14.5x |
+| female-03 | 225.4 Hz | 1495 Hz | 1.38 | 14.5x |
+| neutral | 120.3 Hz | 780 Hz | 0.57 | 35x |
+
+All four presets land inside the adult female range, with formants raised
+alongside. At **~1.4 ms per 20 ms chunk the engine runs ~14x faster than real
+time**, so total audio latency stays at Milestone 7's 80 ms baseline —
+comfortably inside Section 8's "excellent" band, and roughly 5x better than
+Seed-VC's documented figure.
+
+### Three real bugs found by measuring instead of assuming
+
+1. **STFT window larger than the chunk.** A 20 ms chunk is 320 samples at
+   16 kHz while `n_fft=1024` reflection-pads by 512 per side, so short chunks
+   failed outright. Fixed by carrying a full `n_fft` of context between chunks
+   and zero-padding the first one.
+2. **The pitch shift did nothing at all.** The first implementation compressed
+   the waveform and expanded it straight back — an identity operation. Caught
+   because all four presets reported an *identical* f0, which no working shift
+   could produce. Replaced with a proper phase vocoder.
+3. **The corrected shift was still up to 13% wrong.** It resampled the
+   stretched audio to a fixed target length rather than by the requested ratio;
+   `phase_vocoder` rounds to whole frames, so the effective ratio drifted, and
+   5 and 7 semitones both landed on 181.8 Hz. Deriving the target from the
+   actual stretched length brought error to **under 0.5%** across 0-12
+   semitones.
+
+Bug 3 is worth noting for method: the intermediate result *looked* right —
+pitch moved, and every preset landed in the female range. Only checking the
+shift against the semitones actually requested exposed it. A plausible number
+in the expected direction is not a verified one.
+
+12 unit tests cover it, including a parametrised semitone-accuracy check that
+pins bugs 2 and 3 against regression.
