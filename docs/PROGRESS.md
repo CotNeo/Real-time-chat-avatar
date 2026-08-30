@@ -576,3 +576,113 @@ Remaining known quality limits, now that the real bugs are fixed:
   remedy and remains deliberately unimplemented for now (Section 9: get it
   working before optimizing).
 - Good, even lighting on the face still materially improves output.
+
+---
+
+## Milestone 5c — Face enhancement (Section 15) + pipeline fusion
+
+Status: **DONE**
+
+The user asked for the most professional-looking result possible — ideally
+indistinguishable from real video. This milestone delivers the single biggest
+quality improvement available (a face-restoration stage) and, just as
+importantly, establishes honestly what this hardware can and cannot do.
+
+### What was already true and didn't need fixing
+
+Worth stating plainly because it was part of the request: the body, clothing,
+background, hands and everything outside the face region are **never touched**
+— they are the untouched camera feed. Mouth movement, expression, blinks, head
+pose and gaze are likewise **entirely the user's own**: `inswapper` transfers
+identity only and takes all motion from the live frame. So "my movements must
+be exactly mine" was already satisfied by the Mode A architecture; what was
+missing was facial *fidelity*.
+
+### Face enhancement stage
+
+`services/face/enhancer.py` adds GFPGAN v1.4 (512x512 ONNX) restoration over
+the swapped face. `inswapper_128` emits a 128x128 face; when that occupies
+~500px on screen it is upscaled ~4x, which is exactly the softness reported.
+Every serious tool (FaceFusion/ReActor/roop) solves this the same way.
+
+Model choice was benchmarked, not assumed:
+
+| Enhancer | ms/frame (identical input) | Verdict |
+|---|---|---|
+| GFPGAN v1.4 | 126.9 | **chosen** |
+| GPEN-BFR-512 | 302.8 | 2.4x slower, no visible advantage here |
+
+Wired to Section 15's `face.enhancement: off | low | high` (blend 0.5 / 0.85 —
+full strength looks plasticky, so "high" deliberately stops short of 1.0).
+
+### Two measured optimizations
+
+1. **Region-limited paste-back.** The composite step originally warped,
+   eroded, blurred and blended across the entire 1280x720 frame to touch a
+   ~500x600 face — 45.3 ms of pure CPU per frame. Restricting every operation
+   to the destination bounding box is mathematically identical (affine warps
+   translate exactly) and cut it to ~33 ms.
+2. **Fused swap+enhance path.** Composing the stages naively (swap with
+   `paste_back=True`, then let the enhancer re-crop and re-paste) does the
+   expensive align/warp/mask/blend work *twice*. `FaceSwapEngine._swap_and_
+   enhance()` now aligns once at the working size, runs the 128px swap on a
+   downscale of that same crop, restores at 512, and composites once:
+   **168 ms vs 203 ms** for equal-or-better output. The same path is used when
+   enhancement is off (at 256px working size), which also made the
+   unenhanced mode faster: **97.9 ms -> 83.9 ms**.
+
+### Measured, honest results (RTX 2060 6GB, 720p, reproducible still target)
+
+| `face.enhancement` | ms/frame | max pipeline FPS | VRAM |
+|---|---|---|---|
+| off | 83.9 | **11.9** | 2177 MB |
+| low | 172.2 | **5.8** | 3229 MB |
+| high | 172.6 | **5.8** | 3218 MB |
+
+`low` and `high` cost the same — the model runs either way, the level only
+changes the blend weight. VRAM stays far inside the 6 GB budget; **compute
+time, not memory, is the binding constraint.**
+
+### A benchmark that lied, and the fix
+
+The first run of `benchmark_enhancement.py` reported a triumphant "212 FPS,
+4.7 ms/frame" for every level. That was nonsense: nobody was in front of the
+camera, so `process_frame()` early-returned on every frame and the benchmark
+timed *face detection on an empty room*. The script now (a) supports
+`--target-image` for a reproducible compute-cost measurement that doesn't need
+a person present, and (b) **refuses to print any timings at all** if zero
+frames were actually swapped. Recording this because a plausible-looking
+number from a benchmark that measured nothing is worse than no number.
+
+### What is NOT achievable on this hardware — stated plainly
+
+The request was for output that is truly indistinguishable from real video at
+full frame rate. On an RTX 2060 6GB at 720p that is **not achievable**, and no
+amount of tuning in this codebase changes it:
+
+- Best case with enhancement is **~5.8 FPS**; without it, ~11.9 FPS. The
+  webcam itself only delivers ~15 FPS in this room. Smooth 30 FPS *with*
+  restoration would need roughly a 5x speedup.
+- `inswapper_128` produces *resemblance* to the reference identity, not a
+  pixel-accurate match. Genuinely convincing, identity-exact deepfakes come
+  from per-identity trained models (DeepFaceLab-class) requiring hours of
+  offline training per face and offline rendering — fundamentally incompatible
+  with real-time.
+
+Realistic paths to more speed, in order of value (all deliberately NOT done
+yet, per Section 9's "optimize only after it works"):
+1. **TensorRT FP16 engines** for the GFPGAN and inswapper graphs — the
+   standard next step, plausibly ~1.5-2x. Note fp16 *weights* were already
+   found broken for inswapper; TensorRT's fp16 is a different mechanism and
+   would need the same A/B verification.
+2. Run the AI stage in a worker thread (Section 26) so capture never blocks —
+   doesn't raise FPS but removes stalls and keeps latency bounded.
+3. Lower processing resolution — limited benefit, since the fixed 128/512
+   model costs dominate over frame-size-dependent work.
+
+### Remaining honest quality caveats
+
+- Good, even lighting still matters a great deal; the low-light warning
+  overlay stays.
+- Strong head rotation, occlusion (hand over face, thick frames) and faces
+  running past the frame edge all still degrade or skip the swap.

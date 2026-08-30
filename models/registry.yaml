@@ -39,6 +39,25 @@ face:
       provenance discussion and the user's explicit decision to proceed.
     sha256: e4a3f08c753cb72d04e10aa0f7dbe3deebbf39567d4ead6dce08e98aa49e16af
     approx_disk_mb: 529
+  face-enhancer:
+    backend: onnx
+    path: models/face/models/enhancer/GFPGANv1.4.onnx
+    source: https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/GFPGANv1.4.onnx
+    license: >
+      GFPGAN is Tencent ARC's, Apache-2.0 with a non-commercial restriction on
+      some released weights. Same community-mirror caveat as face-swap above.
+      Used strictly locally for consensual avatar experimentation (Section 21),
+      never redistributed.
+    sha256: 6548e54cbcf248af385248f0c1193b359c37a0f98b836282b09cf48af4fd2b73
+    approx_disk_mb: 325
+    io: 512x512 in/out
+    measured_cost_ms: ~88 (GPU inference, RTX 2060) — see docs/PROGRESS.md 5c
+    alternatives_rejected: >
+      GPEN-BFR-512 measured 302.8 ms/frame vs GFPGAN's 126.9 ms on identical
+      input — 2.4x slower for no visible quality advantage here, so GFPGAN is
+      the default. RestoreFormer_PP and CodeFormer not benchmarked (CodeFormer
+      ships only as .pth in this mirror, needing a PyTorch path this project
+      doesn't otherwise carry for face restoration).
 
 voice:
   # voice-female-01:

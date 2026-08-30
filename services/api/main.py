@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 
 from services.face.detector import FaceDetector, FaceDetectorError
 from services.face.engine import FaceEngineError
+from services.face.enhancer import FaceEnhancer, FaceEnhancerError
 from services.face.identity import (
     MAX_REFERENCE_IMAGES,
     IdentityEncoder,
@@ -49,9 +50,15 @@ log = get_logger(__name__)
 
 app = FastAPI(title="Real-Time AI Avatar — control API", version="0.0.1-milestone14-partial")
 
+# Section 15's face.enhancement levels map to how strongly the restored face
+# is blended over the raw swap. Full strength can look plasticky/over-smoothed,
+# so "high" stops short of 1.0 deliberately.
+_ENHANCEMENT_BLEND = {"low": 0.5, "high": 0.85}
+
 _camera_stream: ThreadedCameraStream | None = None
 _detector: FaceDetector | None = None
 _encoder: IdentityEncoder | None = None
+_enhancer: FaceEnhancer | None = None
 _swap_engine: FaceSwapEngine | None = None
 _last_detect_ms: float = 0.0
 _identity_session: IdentitySession | None = None
@@ -99,9 +106,28 @@ def _startup() -> None:
         _encoder = None
         log.error("identity_encoder_load_failed", error=str(e))
 
+    global _enhancer
+    if config.face.enhancement != "off":
+        try:
+            enhancer = FaceEnhancer(blend=_ENHANCEMENT_BLEND[config.face.enhancement])
+            enhancer.load()
+            enhancer.warm_up()
+            _enhancer = enhancer
+            log.info(
+                "face_enhancer_loaded",
+                providers=enhancer.actual_providers,
+                level=config.face.enhancement,
+            )
+        except FaceEnhancerError as e:
+            _enhancer = None
+            log.error("face_enhancer_load_failed", error=str(e))
+    else:
+        _enhancer = None
+        log.info("face_enhancer_disabled", reason="face.enhancement=off in config")
+
     if _detector is not None:
         try:
-            swap_engine = FaceSwapEngine(detector=_detector)
+            swap_engine = FaceSwapEngine(detector=_detector, enhancer=_enhancer)
             swap_engine.load()
             swap_engine.warm_up()
             _swap_engine = swap_engine
@@ -135,6 +161,8 @@ def health() -> dict:
         and _identity_session.is_usable,
         "face_swap_engine_loaded": _swap_engine is not None,
         "face_swap_engine_providers": _swap_engine.actual_providers if _swap_engine else None,
+        "face_enhancement": config.face.enhancement,
+        "face_enhancer_loaded": _enhancer is not None,
         "session_active": _session_active,
         "config": {
             "video": config.video.model_dump(),

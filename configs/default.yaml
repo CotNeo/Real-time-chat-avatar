@@ -24,7 +24,11 @@ face:
   fp16: true
   detection_interval: 3   # run full detection every Nth frame; track in between
   mode: swap               # swap (Mode A, Milestone 5) | reenact (Mode B, later)
-  enhancement: "off"       # off | low | high
+  # off  = fastest, softest face (swap output is only 128x128 upscaled)
+  # low  = GFPGAN restoration blended at 50% — keeps more of your own skin texture
+  # high = GFPGAN at 85% — sharpest, but costs ~85 ms/frame extra. Measured
+  #        numbers for each level are in docs/PROGRESS.md, Milestone 5c.
+  enhancement: high        # off | low | high
 
 voice:
   engine: null             # set once Milestone 8/9 pick a default (rvc | seed-vc)

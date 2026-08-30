@@ -58,6 +58,19 @@ CATALOG = {
         "sha256": "e4a3f08c753cb72d04e10aa0f7dbe3deebbf39567d4ead6dce08e98aa49e16af",
         "installer": "_install_inswapper",
     },
+    "face-enhancer": {
+        "description": "GFPGAN v1.4 face restoration (512x512). Sharpens the "
+        "swap model's 128x128 output — the single biggest visual quality win "
+        "available. Optional: set face.enhancement in configs/default.yaml.",
+        "source": "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/GFPGANv1.4.onnx "
+        "(community mirror — same caveat as face-swap)",
+        "license": "GFPGAN (Tencent ARC), Apache-2.0 with a non-commercial "
+        "restriction on some released weights. Local, non-redistributed use "
+        "only in this project.",
+        "approx_disk_mb": 325,
+        "sha256": "6548e54cbcf248af385248f0c1193b359c37a0f98b836282b09cf48af4fd2b73",
+        "installer": "_install_face_enhancer",
+    },
 }
 
 
@@ -101,10 +114,36 @@ def _install_inswapper() -> None:
     print("Done.")
 
 
+def _install_face_enhancer() -> None:
+    import hashlib
+    import urllib.request
+
+    target_dir = MODELS_DIR / "face" / "models" / "enhancer"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / "GFPGANv1.4.onnx"
+    url = CATALOG["face-enhancer"]["source"].split(" ")[0]
+    print(f"Downloading {url} -> {target_path} ...")
+    urllib.request.urlretrieve(url, target_path)
+
+    expected = CATALOG["face-enhancer"]["sha256"]
+    actual = hashlib.sha256(target_path.read_bytes()).hexdigest()
+    if actual != expected:
+        target_path.unlink()
+        raise RuntimeError(
+            f"Checksum mismatch! Expected {expected}, got {actual}. "
+            "Deleted the downloaded file — do not trust it."
+        )
+    print(f"Checksum verified: {actual}")
+    print("Done.")
+
+
 _INSTALLED_CHECKS = {
     "face-detection": lambda: (MODELS_DIR / "face" / "models" / "buffalo_l").exists(),
     "face-swap": lambda: (
         MODELS_DIR / "face" / "models" / "inswapper" / "inswapper_128.onnx"
+    ).exists(),
+    "face-enhancer": lambda: (
+        MODELS_DIR / "face" / "models" / "enhancer" / "GFPGANv1.4.onnx"
     ).exists(),
 }
 

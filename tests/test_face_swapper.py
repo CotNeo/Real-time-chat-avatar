@@ -34,6 +34,26 @@ def _make_face():
     )
 
 
+class FakeSwapModel:
+    """Stands in for insightface's INSwapper. The engine drives the ONNX
+    session directly (rather than calling INSwapper.get) so that swap and
+    enhancement can share one alignment and one paste-back, so the fake has to
+    mirror that lower-level surface: `emap`, `session.run`, and the input/
+    output name lists."""
+
+    def __init__(self):
+        self.emap = np.eye(512, dtype=np.float32)
+        self.input_names = ["target", "source"]
+        self.output_names = ["output"]
+        self.run_count = 0
+        self.session = self
+
+    def run(self, output_names, feeds):
+        self.run_count += 1
+        # Shape the engine expects back: NCHW float in 0..1
+        return [np.full((1, 3, 128, 128), 0.5, dtype=np.float32)]
+
+
 def test_process_frame_before_load_raises():
     engine = FaceSwapEngine(detector=FakeDetector([]))
     with pytest.raises(FaceEngineError, match="before load"):
@@ -76,15 +96,10 @@ def test_detection_interval_skips_redetection_on_subsequent_frames():
     detector = FakeDetector([face])
     engine = FaceSwapEngine(detector=detector)
     engine.detection_interval = 3
-
-    class RecordingSwapper:
-        def get(self, img, target_face, source_face, paste_back=True):
-            return img
-
-    engine._swapper = RecordingSwapper()
+    engine._swapper = FakeSwapModel()
     engine._source_embedding = np.ones(512, dtype=np.float32)
 
-    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    frame = np.zeros((200, 200, 3), dtype=np.uint8)
     ran_detection = []
     for _ in range(6):
         result = engine.process_frame(frame)
@@ -126,12 +141,8 @@ def test_fully_in_frame_face_is_swapped_normally():
     face = _make_face()  # bbox (10,10,100,100), well inside a 200x200 frame
     detector = FakeDetector([face])
     engine = FaceSwapEngine(detector=detector)
-
-    class MarkingSwapper:
-        def get(self, img, target_face, source_face, paste_back=True):
-            return np.full_like(img, 200)
-
-    engine._swapper = MarkingSwapper()
+    swap_model = FakeSwapModel()
+    engine._swapper = swap_model
     engine._source_embedding = np.ones(512, dtype=np.float32)
 
     frame = np.zeros((200, 200, 3), dtype=np.uint8)
@@ -139,7 +150,10 @@ def test_fully_in_frame_face_is_swapped_normally():
 
     assert result.face_detected is True
     assert result.skip_reason is None
-    assert result.output_image.mean() == 200  # swapper actually ran
+    assert swap_model.run_count == 1  # the swap model actually ran
+    # The fake returns a constant mid-gray face, so the composited frame must
+    # differ from the all-black input where the face was pasted.
+    assert result.output_image.max() > 0
 
 
 def test_reset_clears_tracking_state_forcing_redetection():

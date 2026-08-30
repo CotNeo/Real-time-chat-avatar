@@ -33,6 +33,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+import cv2
+
+if TYPE_CHECKING:
+    from services.face.enhancer import FaceEnhancer
 from types import SimpleNamespace
 
 import numpy as np
@@ -71,10 +77,17 @@ class FaceSwapEngine(FaceEngine):
         detector: FaceDetector,
         model_path: Path = DEFAULT_SWAP_MODEL_PATH,
         use_gpu: bool = True,
+        enhancer: "FaceEnhancer | None" = None,
     ) -> None:
         self._detector = detector
         self.model_path = model_path
         self.use_gpu = use_gpu
+        # Optional restoration stage (Section 15's face.enhancement setting).
+        # When present, process_frame() takes a fused path that shares one
+        # alignment and one paste-back between swap and enhancement instead of
+        # doing each twice — measured 168 ms vs 203 ms per frame for the same
+        # output quality (docs/PROGRESS.md, Milestone 5c).
+        self.enhancer = enhancer
         self._swapper = None
         self._source_embedding: np.ndarray | None = None
         self.actual_providers: list[str] = []
@@ -203,9 +216,7 @@ class FaceSwapEngine(FaceEngine):
             )
 
         infer_start = time.perf_counter()
-        target_face = SimpleNamespace(kps=face.landmarks)
-        source_face = SimpleNamespace(normed_embedding=self._source_embedding)
-        output_image = self._swapper.get(frame, target_face, source_face, paste_back=True)
+        output_image = self._swap_and_enhance(frame, face.landmarks)
         timings["inference"] = (time.perf_counter() - infer_start) * 1000
 
         return FaceFrameResult(
@@ -216,6 +227,60 @@ class FaceSwapEngine(FaceEngine):
             detection_ran_this_frame=detection_ran,
             timings_ms=timings,
         )
+
+
+    def _swap_and_enhance(self, frame: np.ndarray, landmarks: np.ndarray) -> np.ndarray:
+        """Single fused path for both enhanced and unenhanced output.
+
+        Aligns once at the working size, runs the 128px swap on a downscale of
+        that same crop, optionally restores at 512, and composites exactly
+        once with a region-limited soft-mask paste-back.
+
+        Two measured reasons this replaced the naive composition:
+          * With enhancement on, doing swap-then-enhance separately warps,
+            masks and blends the full frame twice for no benefit — 203 ms vs
+            168 ms per frame for equal-or-better output.
+          * With enhancement off, InsightFace's own `INSwapper.get(
+            paste_back=True)` blends over the whole frame; routing through the
+            same region-limited paste-back here is cheaper for identical
+            output.
+        See docs/PROGRESS.md, Milestone 5c, for the numbers.
+        """
+        from insightface.utils import face_align
+
+        from services.face.enhancer import ENHANCER_SIZE, _paste_back
+
+        # Work at 512 when restoring (the enhancer's fixed input size), else
+        # 256 — enough to keep the 128px swap result from being resampled up
+        # and straight back down, without paying for pixels nothing reads.
+        work_size = ENHANCER_SIZE if self.enhancer is not None else 256
+        aligned, affine_matrix = face_align.norm_crop2(frame, landmarks, work_size)
+
+        swap_input = cv2.resize(aligned, (128, 128), interpolation=cv2.INTER_AREA)
+        blob = cv2.dnn.blobFromImage(
+            swap_input, 1.0 / 255.0, (128, 128), (0.0, 0.0, 0.0), swapRB=True
+        )
+        latent = self._source_embedding.reshape((1, -1)) @ self._swapper.emap
+        latent /= np.linalg.norm(latent)
+        prediction = self._swapper.session.run(
+            self._swapper.output_names,
+            {self._swapper.input_names[0]: blob, self._swapper.input_names[1]: latent},
+        )[0]
+        swapped = np.clip(255 * prediction.transpose((0, 2, 3, 1))[0], 0, 255)
+        swapped = swapped.astype(np.uint8)[:, :, ::-1]  # RGB -> BGR
+
+        face_out = cv2.resize(
+            swapped, (work_size, work_size), interpolation=cv2.INTER_LANCZOS4
+        )
+        if self.enhancer is not None:
+            restored = self.enhancer._run_model(face_out)
+            if self.enhancer.blend < 1.0:
+                restored = cv2.addWeighted(
+                    restored, self.enhancer.blend, face_out, 1.0 - self.enhancer.blend, 0
+                )
+            face_out = restored
+
+        return _paste_back(frame, face_out, affine_matrix)
 
 
 def _is_out_of_frame(

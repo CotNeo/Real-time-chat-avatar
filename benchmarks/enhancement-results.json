@@ -1,0 +1,38 @@
+[
+  {
+    "enhancement": "off",
+    "frames": 96,
+    "frames_actually_swapped": 96,
+    "process_ms": {
+      "mean": 83.9,
+      "p50": 80.7,
+      "p95": 93.1
+    },
+    "max_pipeline_fps": 11.9,
+    "vram_used_mb": 2177
+  },
+  {
+    "enhancement": "low",
+    "frames": 47,
+    "frames_actually_swapped": 47,
+    "process_ms": {
+      "mean": 172.2,
+      "p50": 168.5,
+      "p95": 183.3
+    },
+    "max_pipeline_fps": 5.8,
+    "vram_used_mb": 3229
+  },
+  {
+    "enhancement": "high",
+    "frames": 47,
+    "frames_actually_swapped": 47,
+    "process_ms": {
+      "mean": 172.6,
+      "p50": 170.4,
+      "p95": 181.6
+    },
+    "max_pipeline_fps": 5.8,
+    "vram_used_mb": 3218
+  }
+]
