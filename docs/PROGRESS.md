@@ -926,3 +926,85 @@ verification, biometric checks or platform trust systems. The reference faces
 in use are synthetic — people who do not exist — which keeps it on that side
 of the line; pointing it at a real person's photos to appear as them to
 others would not be.
+
+---
+
+## Milestone 5f — Forehead/expression coverage; hair and ears investigated
+
+Status: **DONE** for what the architecture allows; hair replacement declined
+with evidence.
+
+### Mask reach was silently costing expressions
+
+Visualising the actual mask over an aligned face (rather than trusting the
+code) showed it hugged the face oval and **stopped at the eyebrows** —
+coverage 0.332. So the forehead was never swapped: raising or furrowing the
+brow moved the user's *own* forehead while everything below the brows was
+someone else's face. The user reported brow furrowing among the expressions
+that should carry through, and this was the direct cause.
+
+Compared three expansion levels on the same frame:
+
+| `mask_expand` | Coverage | Result |
+|---|---|---|
+| 1.04 (was default) | 0.332 | stops at eyebrows, forehead not transferred |
+| **1.3 (new default)** | 0.512 | reaches hairline and temples, clean blend |
+| 1.6 | 0.718 | visually indistinguishable from 1.3 here; starts encroaching on hair |
+
+1.3 is the new default, exposed as `face.mask_expand` (validated 1.0-1.8).
+
+### Expressions: what actually transfers, verified
+
+`inswapper` takes all geometry from the live frame and applies only identity,
+so expression transfer is inherent rather than a feature to add. Verified on a
+live captured frame that head pose, gaze direction and mouth position survive
+the swap, and that the GFPGAN restoration stage preserves expression geometry
+(it smooths skin; it does not reshape the face).
+
+Honest split of the specific expressions asked about:
+- **Talking / mouth movement, blinking, brow raise and furrow** — transfer, and
+  the brow case is materially better now that the forehead is inside the mask.
+- **Kiss / pursed lips** — geometry transfers; fine lip detail is limited by
+  the model's 128px output.
+- **Tongue out** — expected to render poorly. `inswapper`'s training
+  distribution contains very few tongue-out faces, and the inner mouth is the
+  known weak region of this model class. Not verified live (would require the
+  user to hold the expression on camera); flagged as expected-poor rather than
+  claimed either way.
+
+### Hair and ears: investigated, and it cannot work the way it was asked
+
+The request was for hair and ears to be taken over completely. Rather than
+assume, the raw unmasked model output was dumped and inspected. The finding is
+decisive:
+
+**The swap model does not transfer hair from the reference — it reconstructs
+the *target's* hair.** In the unmasked output the hair is still the user's own
+dark hair and cap, not the blonde hair of the reference photos. `inswapper`
+maps a 512-d identity embedding onto a face region; hair is not encoded in
+that embedding at all.
+
+So expanding the mask over the hair does not give the reference's hairstyle.
+It replaces the user's real, sharp hair with the model's blurrier
+reconstruction of that same hair — strictly worse, which is what the earlier
+5d comparison already showed and this now explains.
+
+Ears sit in between: partially inside the aligned crop, and now partially
+covered at `mask_expand: 1.3`, which is why that value was chosen over 1.04.
+Pushing further to grab ears fully runs into the hair problem above.
+
+Getting the reference person's actual hair would need a full head-swap or
+head-synthesis model (HeSer-class, StyleGAN full-head, or a 3D avatar
+pipeline). None run in real time on a 6 GB RTX 2060, and they are a different
+architecture, not a tuning change to this one.
+
+### Current defaults
+
+```yaml
+face:
+  enhancement: high
+  mask: contour
+  mask_expand: 1.3     # new — includes forehead so brow expressions transfer
+  color_match: true
+  occlusion_mask: true
+```

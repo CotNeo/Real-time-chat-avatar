@@ -178,6 +178,7 @@ def _startup() -> None:
             swap_engine.masker = _masker
             swap_engine.occluder = _occluder
             swap_engine.color_match = config.face.color_match
+            swap_engine.mask_expand = config.face.mask_expand
             _swap_engine = swap_engine
             log.info(
                 "face_swap_engine_loaded",
@@ -220,6 +221,7 @@ def health() -> dict:
         "face_mask": config.face.mask,
         "landmark_masker_loaded": _masker is not None,
         "color_match": config.face.color_match,
+        "mask_expand": config.face.mask_expand,
         "occlusion_mask_loaded": _occluder is not None,
         "session_active": _session_active,
         "config": {

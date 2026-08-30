@@ -39,6 +39,10 @@ face:
   # generated face smeared over it. Costs ~46 ms/frame — turn off only if you
   # need the frame rate more than you need that fixed.
   occlusion_mask: true
+  # Reach of the face mask. 1.3 includes the forehead and temples, so raising
+  # or furrowing your brow shows on the swapped face; 1.04 stopped at the
+  # eyebrows and left your own forehead visible.
+  mask_expand: 1.3
 
 voice:
   engine: null             # set once Milestone 8/9 pick a default (rvc | seed-vc)

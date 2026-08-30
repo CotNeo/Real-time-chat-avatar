@@ -43,6 +43,11 @@ class FaceConfig(BaseModel):
     # Detect things in front of the face (a hand, a mug) and leave their real
     # pixels alone instead of painting the swap over them. Costs ~46 ms/frame.
     occlusion_mask: bool = True
+    # How far the contour mask reaches past the face outline. Below ~1.2 it
+    # stops at the eyebrows, so forehead expressions (raised/furrowed brow)
+    # are not transferred. Above ~1.6 it starts covering hair the model can
+    # only reconstruct blurrily.
+    mask_expand: float = Field(default=1.3, ge=1.0, le=1.8)
 
 
 class VoiceConfig(BaseModel):

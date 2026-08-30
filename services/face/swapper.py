@@ -97,6 +97,12 @@ class FaceSwapEngine(FaceEngine):
         self.masker: "LandmarkMasker | None" = None
         self.occluder: "OcclusionMasker | None" = None
         self.color_match = True
+        # How far the contour mask grows past the landmark hull. 1.04 hugged
+        # the face oval and stopped at the eyebrows, which meant the forehead
+        # was never swapped — so a raised brow or forehead creases stayed on
+        # the user's own skin while the rest of the face was someone else's.
+        # 1.3 reaches the hairline and temples; measured no quality cost.
+        self.mask_expand = 1.3
         self._swapper = None
         self._source_embedding: np.ndarray | None = None
         self.actual_providers: list[str] = []
@@ -301,7 +307,9 @@ class FaceSwapEngine(FaceEngine):
         if self.masker is not None and bbox is not None:
             dense = self.masker.landmarks_106(frame, bbox, landmarks)
             if dense is not None:
-                face_mask = self.masker.build_mask(dense, affine_matrix, work_size)
+                face_mask = self.masker.build_mask(
+                    dense, affine_matrix, work_size, expand=self.mask_expand
+                )
 
         # Occlusion mask: multiply in, so anything held in front of the face
         # (a hand, a mug) keeps its real pixels instead of having a generated
