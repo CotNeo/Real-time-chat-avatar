@@ -1,0 +1,56 @@
+[
+  {
+    "blocks_captured": 198,
+    "blocks_played": 198,
+    "input_overflows": 0,
+    "output_underflows": 1,
+    "ring_drops": 0,
+    "capture_block_interval_ms": {
+      "mean": 20.06,
+      "p95": 21.46,
+      "max": 25.47
+    },
+    "block_ms": 20,
+    "block_frames": 320,
+    "sample_rate": 16000,
+    "reported_roundtrip_latency_ms": 80.0,
+    "mic_peak_amplitude": 0.487,
+    "mic_receiving_signal": true
+  },
+  {
+    "blocks_captured": 99,
+    "blocks_played": 98,
+    "input_overflows": 0,
+    "output_underflows": 2,
+    "ring_drops": 0,
+    "capture_block_interval_ms": {
+      "mean": 40.12,
+      "p95": 42.9,
+      "max": 42.95
+    },
+    "block_ms": 40,
+    "block_frames": 640,
+    "sample_rate": 16000,
+    "reported_roundtrip_latency_ms": 120.0,
+    "mic_peak_amplitude": 0.4368,
+    "mic_receiving_signal": true
+  },
+  {
+    "blocks_captured": 49,
+    "blocks_played": 48,
+    "input_overflows": 0,
+    "output_underflows": 2,
+    "ring_drops": 0,
+    "capture_block_interval_ms": {
+      "mean": 80.13,
+      "p95": 85.77,
+      "max": 85.78
+    },
+    "block_ms": 80,
+    "block_frames": 1280,
+    "sample_rate": 16000,
+    "reported_roundtrip_latency_ms": 240.0,
+    "mic_peak_amplitude": 0.4073,
+    "mic_receiving_signal": true
+  }
+]

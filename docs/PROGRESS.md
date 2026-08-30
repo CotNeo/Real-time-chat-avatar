@@ -1313,3 +1313,52 @@ user's own footage. Those are the elements carrying most of the remaining
 male read, and no face-region model addresses them — the practical remedies
 are physical (wig, front lighting, tighter head-and-shoulders framing), not
 code.
+
+---
+
+## Milestone 7 — Microphone baseline (no AI in the path)
+
+Status: **DONE**
+
+Establishes what the hardware and OS cost on their own, so the voice-conversion
+cost added next can be attributed honestly instead of being blamed on — or
+hidden by — device latency.
+
+`shared/utils/audio.py` provides `AudioConfig`, a bounded `AudioRing`, and
+`AudioLoopback` (microphone -> ring -> speaker). Two design points, both from
+Section 25/26:
+
+- **Audio does not use the video pipeline's latest-frame-wins rule.** Dropping
+  a video frame costs one stale image; dropping audio makes an audible click.
+  The ring is a bounded FIFO that stays in order, and when it does overflow it
+  discards the *oldest* block and counts it — keeping the oldest instead would
+  let the speaker drift seconds behind the microphone, the exact unbounded-queue
+  failure Section 25 warns about.
+- **No AI may run inside the PortAudio callbacks.** They are the device's own
+  threads; a slow callback underruns the stream. The conversion stage hooks in
+  as a `processor`, and Milestone 8 has to keep that call short or move it off
+  the callback thread entirely.
+
+### Measured (real hardware: webcam mic in, analog out, 16 kHz mono)
+
+| Block | Frames | Round-trip latency | Input overflows | Underflows | Ring drops | Mic signal |
+|---|---|---|---|---|---|---|
+| **20 ms** | 320 | **80.0 ms** | 0 | 1 | 0 | yes |
+| 40 ms | 640 | 120.0 ms | 0 | 2 | 0 | yes |
+| 80 ms | 1280 | 240.0 ms | 0 | 2 | 0 | yes |
+
+Latency scales linearly with block size, as expected. Zero input overflows and
+zero ring drops at every size — the path keeps up cleanly; the 1-2 underflows
+are startup transients before the ring has filled.
+
+Against Section 8's targets, **20 ms blocks give 80 ms round-trip, inside the
+"excellent" band (<100 ms)**. That leaves roughly 120 ms of budget for voice
+conversion before the total reaches the 200 ms "good" boundary.
+
+The benchmark tracks microphone peak amplitude and reports
+`mic_receiving_signal`, then warns loudly if every run was silent — a latency
+number measured against a muted microphone describes the device path but tests
+nothing end to end, and this is exactly the kind of quietly-meaningless result
+that the video benchmarks produced twice before being made to refuse it.
+
+Next: Milestone 8 — voice conversion, with a ~120 ms budget to fit inside.
