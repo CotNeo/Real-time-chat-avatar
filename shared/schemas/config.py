@@ -33,6 +33,13 @@ class FaceConfig(BaseModel):
     detection_interval: int = Field(default=3, ge=1)
     mode: Literal["swap", "reenact"] = "swap"
     enhancement: Literal["off", "low", "high"] = "off"
+    # "contour" masks to the real face outline (106-point hull), leaving your
+    # own hair/ears/background untouched; "square" pastes the whole aligned
+    # crop, which also covers hair with the model's blurry approximation of it.
+    mask: Literal["contour", "square"] = "contour"
+    # Rescale the generated face's colour statistics to the live frame's, so
+    # it carries the room's lighting instead of the reference photo's.
+    color_match: bool = True
 
 
 class VoiceConfig(BaseModel):

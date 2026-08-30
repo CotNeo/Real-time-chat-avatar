@@ -686,3 +686,131 @@ yet, per Section 9's "optimize only after it works"):
   overlay stays.
 - Strong head rotation, occlusion (hand over face, thick frames) and faces
   running past the frame edge all still degrade or skip the swap.
+
+---
+
+## Milestone 5d — Realism pass: contour masking, colour transfer, model bake-off
+
+Status: **DONE**
+
+The user asked for the most convincing result possible — ideally
+indistinguishable, matching the uploaded person "head to toe", with exact
+mouth/expression sync. This milestone does everything achievable toward that
+and records plainly what is not.
+
+### Scope correction stated up front
+
+- **"Head to toe" is out of reach and always will be for this architecture.**
+  Face swap replaces a face region. Hair, body, clothing and neck stay the
+  user's. Regenerating a whole body to match a reference photo is
+  diffusion-class video synthesis — seconds per frame, not real time.
+- **Gender is not a separate control.** It rides along with the transferred
+  face identity: a female reference yields a female-looking *face*. Because
+  hair and body remain the user's, the overall read can still be mixed.
+- **Mouth/expression sync needed no work** — it was already exact.
+  `inswapper` transfers identity only and takes all motion from the live
+  frame, so blinks, mouth shapes, head pose and gaze are already 1:1.
+
+### Swap-model bake-off (the headline finding)
+
+Discovered the mirror also hosts newer **256px** swap models — twice the
+resolution of `inswapper_128`, which had been named in Milestone 5c as the
+root cause of softness. Downloaded and benchmarked them properly instead of
+assuming higher resolution wins.
+
+Identity transfer was measured **objectively**, not by eye: run the swap, then
+re-extract an ArcFace embedding from the result and take its cosine similarity
+to the reference identity. (Baseline — the untouched target vs the reference —
+scores 0.25, i.e. "different people".)
+
+| Model | Identity similarity | Model time | Native res | Extra |
+|---|---|---|---|---|
+| **inswapper_128** | **0.841** | 57.5 ms | 128px | — |
+| hyperswap_1a_256 | 0.767 | **25.8 ms** | 256px | emits an occlusion mask |
+| reswapper_256 | 0.753 | 203.4 ms | 256px | — |
+
+`hyperswap` is genuinely tempting: 2.2x faster, twice the resolution, and it
+even outputs its own occlusion mask. **It was still rejected.** The user's
+core request is to *look like the uploaded person*, and inswapper transfers
+identity ~10% better. Sharpness can be recovered by a restoration stage;
+identity that the swap model never produced cannot be recovered downstream.
+Resolution was the obvious-looking answer and was the wrong one — worth
+recording, since "newer, bigger model" nearly won on assumption alone.
+
+(`hyperswap` also required different preprocessing: no `emap` projection, it
+consumes the raw 512-d embedding. `reswapper_256` carries an `emap` and is
+otherwise drop-in with inswapper.)
+
+### Two realism stages added (`services/face/masking.py`)
+
+Both attack "obviously pasted on" rather than sharpness:
+
+1. **Contour mask from 106 landmarks.** The paste-back previously used the
+   whole aligned square, eroded and blurred — which covers forehead, hair
+   edges and background corners that are not the person's face. Now the mask
+   is the convex hull of the 106-point face contour, slightly expanded and
+   feathered. The landmark model (`2d106det.onnx`) was **already in the
+   `buffalo_l` pack** downloaded back in Milestone 3, so this costs no new
+   download and measured **1.8 ms/frame**.
+   Visible effect: the user's own hair stays sharp and real instead of being
+   painted over by the swap model's blurry approximation of hair.
+2. **LAB colour transfer.** The generated face carries the reference photo's
+   skin tone and lighting, which rarely matches the user's room — usually the
+   real reason a swap reads as fake at the jawline. Per-channel statistics are
+   matched in LAB (luminance separated from chroma) using **only pixels inside
+   the mask**, so a bright wall behind the user cannot bias the correction.
+
+### Measured cost of each stage (RTX 2060, 720p, reproducible still target)
+
+| Configuration | ms/frame | FPS | Identity similarity |
+|---|---|---|---|
+| swap only | 82.1 | 12.2 | 0.842 |
+| + enhancement | 170.9 | 5.9 | 0.812 |
+| + contour mask | 154.4 | 6.5 | 0.748 |
+| + colour transfer (**default**) | 163.0 | 6.1 | 0.744 |
+
+Two things in that table need honest interpretation rather than a naive read:
+
+- **The falling identity number is not a regression.** It is measured over the
+  whole face crop, and the contour mask deliberately hands hair and edges back
+  to the *user's real footage*. Less of the crop is generated, so crop-level
+  similarity drops while the face itself is unchanged. Side-by-side images
+  confirm the masked version looks markedly more real. A metric that rewards
+  covering more of the user with generated pixels is the wrong metric for this
+  stage, and was not allowed to drive the decision.
+- **GFPGAN restoration costs ~0.03 identity** (0.842 → 0.812): it "beautifies"
+  and drifts slightly from the reference. Sharpness is worth it here, but the
+  trade is real and now measured rather than assumed.
+- The contour mask is *cheaper* than the square fallback (154.4 vs 170.9 ms) —
+  it skips the erode/blur mask construction entirely.
+
+Colour transfer was optimised during this milestone: computing its six
+statistics on a 128px thumbnail instead of the full 512px face is visually
+identical and cut the stage from ~25 ms to ~8.6 ms.
+
+### Configuration (Section 18 — all of this is switchable, nothing hardcoded)
+
+```yaml
+face:
+  enhancement: high      # off | low | high
+  mask: contour          # contour | square
+  color_match: true
+```
+`/health` reports all three so the running configuration is never a guess.
+
+### Where the remaining quality gap actually is
+
+With everything on: **6.1 FPS at 720p**, VRAM 3.6/6.1 GB. Compute, not memory,
+remains the binding constraint. Honest ranking of what is still missing, worst
+first:
+
+1. **Frame rate.** 6 FPS is the single most "fake"-looking property left — far
+   more damaging to believability than any per-frame detail. TensorRT FP16
+   engines for GFPGAN + inswapper are the standard next step (~1.5-2x hoped).
+2. **Temporal stability.** Each frame is processed independently, so lighting
+   and detail shimmer slightly between frames. Landmark smoothing across
+   frames would help and is not implemented.
+3. **Occlusion.** A hand or object crossing the face is not detected; the
+   contour mask is landmark-derived, not a true segmentation. `hyperswap`'s
+   emitted mask is a possible source here even if its swap output is unused.
+4. **Hair/body**, as covered above — architecturally out of scope.

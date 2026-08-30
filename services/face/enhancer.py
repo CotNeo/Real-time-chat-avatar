@@ -138,7 +138,10 @@ class FaceEnhancer:
 
 
 def _paste_back(
-    target_frame: np.ndarray, restored_face: np.ndarray, affine_matrix: np.ndarray
+    target_frame: np.ndarray,
+    restored_face: np.ndarray,
+    affine_matrix: np.ndarray,
+    face_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Warp the restored 512x512 face back into the full frame using a soft,
     eroded+blurred mask so the boundary doesn't show as a visible rectangle.
@@ -191,25 +194,41 @@ def _paste_back(
     warped_face = cv2.warpAffine(
         restored_face, region_matrix, (region_width, region_height), borderValue=0.0
     )
-    mask = np.full((size, size), 255, dtype=np.float32)
-    warped_mask = cv2.warpAffine(
-        mask, region_matrix, (region_width, region_height), borderValue=0.0
-    )
-    warped_mask[warped_mask > 20] = 255
 
-    mask_indices = np.where(warped_mask == 255)
-    if mask_indices[0].size == 0:
-        return target_frame
+    if face_mask is not None:
+        # A real face-shaped mask (see services/face/masking.py). It is already
+        # feathered in aligned space, so warping it is all that's needed —
+        # eroding/blurring again would eat into the face contour it was built
+        # to follow.
+        warped_mask = cv2.warpAffine(
+            face_mask, region_matrix, (region_width, region_height), borderValue=0.0
+        )
+        warped_mask = np.clip(warped_mask, 0.0, 1.0)[:, :, np.newaxis]
+    else:
+        # Fallback: the whole aligned square, eroded and blurred. Covers
+        # forehead/hair/background corners, so the boundary is more visible —
+        # only used when landmark masking is unavailable.
+        mask = np.full((size, size), 255, dtype=np.float32)
+        warped_mask = cv2.warpAffine(
+            mask, region_matrix, (region_width, region_height), borderValue=0.0
+        )
+        warped_mask[warped_mask > 20] = 255
 
-    mask_h = np.max(mask_indices[0]) - np.min(mask_indices[0])
-    mask_w = np.max(mask_indices[1]) - np.min(mask_indices[1])
-    mask_size = int(np.sqrt(max(mask_h * mask_w, 1)))
+        mask_indices = np.where(warped_mask == 255)
+        if mask_indices[0].size == 0:
+            return target_frame
 
-    erode_k = max(mask_size // 12, 6)
-    warped_mask = cv2.erode(warped_mask, np.ones((erode_k, erode_k), np.uint8), iterations=1)
-    blur_k = max(mask_size // 16, 5)
-    warped_mask = cv2.GaussianBlur(warped_mask, (2 * blur_k + 1, 2 * blur_k + 1), 0)
-    warped_mask = (warped_mask / 255.0)[:, :, np.newaxis]
+        mask_h = np.max(mask_indices[0]) - np.min(mask_indices[0])
+        mask_w = np.max(mask_indices[1]) - np.min(mask_indices[1])
+        mask_size = int(np.sqrt(max(mask_h * mask_w, 1)))
+
+        erode_k = max(mask_size // 12, 6)
+        warped_mask = cv2.erode(
+            warped_mask, np.ones((erode_k, erode_k), np.uint8), iterations=1
+        )
+        blur_k = max(mask_size // 16, 5)
+        warped_mask = cv2.GaussianBlur(warped_mask, (2 * blur_k + 1, 2 * blur_k + 1), 0)
+        warped_mask = (warped_mask / 255.0)[:, :, np.newaxis]
 
     output = target_frame.copy()
     region = output[y_min:y_max, x_min:x_max].astype(np.float32)

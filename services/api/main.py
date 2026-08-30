@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from services.face.detector import FaceDetector, FaceDetectorError
 from services.face.engine import FaceEngineError
 from services.face.enhancer import FaceEnhancer, FaceEnhancerError
+from services.face.masking import FaceMaskerError, LandmarkMasker
 from services.face.identity import (
     MAX_REFERENCE_IMAGES,
     IdentityEncoder,
@@ -59,6 +60,7 @@ _camera_stream: ThreadedCameraStream | None = None
 _detector: FaceDetector | None = None
 _encoder: IdentityEncoder | None = None
 _enhancer: FaceEnhancer | None = None
+_masker: LandmarkMasker | None = None
 _swap_engine: FaceSwapEngine | None = None
 _last_detect_ms: float = 0.0
 _identity_session: IdentitySession | None = None
@@ -125,13 +127,34 @@ def _startup() -> None:
         _enhancer = None
         log.info("face_enhancer_disabled", reason="face.enhancement=off in config")
 
+    global _masker
+    if config.face.mask == "contour":
+        try:
+            masker = LandmarkMasker()
+            masker.load()
+            _masker = masker
+            log.info("landmark_masker_loaded", providers=masker.actual_providers)
+        except FaceMaskerError as e:
+            _masker = None
+            log.error("landmark_masker_load_failed", error=str(e))
+    else:
+        _masker = None
+        log.info("landmark_masker_disabled", reason="face.mask=square in config")
+
     if _detector is not None:
         try:
             swap_engine = FaceSwapEngine(detector=_detector, enhancer=_enhancer)
             swap_engine.load()
             swap_engine.warm_up()
+            swap_engine.masker = _masker
+            swap_engine.color_match = config.face.color_match
             _swap_engine = swap_engine
-            log.info("face_swap_engine_loaded", providers=swap_engine.actual_providers)
+            log.info(
+                "face_swap_engine_loaded",
+                providers=swap_engine.actual_providers,
+                mask=config.face.mask,
+                color_match=config.face.color_match,
+            )
         except FaceEngineError as e:
             _swap_engine = None
             log.error("face_swap_engine_load_failed", error=str(e))
@@ -163,6 +186,9 @@ def health() -> dict:
         "face_swap_engine_providers": _swap_engine.actual_providers if _swap_engine else None,
         "face_enhancement": config.face.enhancement,
         "face_enhancer_loaded": _enhancer is not None,
+        "face_mask": config.face.mask,
+        "landmark_masker_loaded": _masker is not None,
+        "color_match": config.face.color_match,
         "session_active": _session_active,
         "config": {
             "video": config.video.model_dump(),

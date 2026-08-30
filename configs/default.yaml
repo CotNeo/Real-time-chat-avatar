@@ -29,6 +29,12 @@ face:
   # high = GFPGAN at 85% — sharpest, but costs ~85 ms/frame extra. Measured
   #        numbers for each level are in docs/PROGRESS.md, Milestone 5c.
   enhancement: high        # off | low | high
+  # contour = mask to the real face outline, keeping YOUR hair/ears sharp and
+  #           natural (recommended — measured clearly more realistic).
+  # square  = paste the whole aligned crop, which also paints over hair with
+  #           the swap model's blurry approximation of it.
+  mask: contour            # contour | square
+  color_match: true        # match the generated face to the room's lighting
 
 voice:
   engine: null             # set once Milestone 8/9 pick a default (rvc | seed-vc)

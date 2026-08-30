@@ -39,6 +39,7 @@ import cv2
 
 if TYPE_CHECKING:
     from services.face.enhancer import FaceEnhancer
+    from services.face.masking import LandmarkMasker
 from types import SimpleNamespace
 
 import numpy as np
@@ -88,6 +89,13 @@ class FaceSwapEngine(FaceEngine):
         # doing each twice — measured 168 ms vs 203 ms per frame for the same
         # output quality (docs/PROGRESS.md, Milestone 5c).
         self.enhancer = enhancer
+        # Optional realism stages (docs/PROGRESS.md, Milestone 5d). Both are
+        # cheap and both target the "obviously pasted on" look rather than
+        # sharpness: a face-contour mask instead of the aligned square, and
+        # colour transfer so the generated face carries the room's lighting
+        # instead of the reference photo's.
+        self.masker: "LandmarkMasker | None" = None
+        self.color_match = True
         self._swapper = None
         self._source_embedding: np.ndarray | None = None
         self.actual_providers: list[str] = []
@@ -216,7 +224,7 @@ class FaceSwapEngine(FaceEngine):
             )
 
         infer_start = time.perf_counter()
-        output_image = self._swap_and_enhance(frame, face.landmarks)
+        output_image = self._swap_and_enhance(frame, face.landmarks, face.bbox)
         timings["inference"] = (time.perf_counter() - infer_start) * 1000
 
         return FaceFrameResult(
@@ -229,7 +237,12 @@ class FaceSwapEngine(FaceEngine):
         )
 
 
-    def _swap_and_enhance(self, frame: np.ndarray, landmarks: np.ndarray) -> np.ndarray:
+    def _swap_and_enhance(
+        self,
+        frame: np.ndarray,
+        landmarks: np.ndarray,
+        bbox: tuple[int, int, int, int] | None = None,
+    ) -> np.ndarray:
         """Single fused path for both enhanced and unenhanced output.
 
         Aligns once at the working size, runs the 128px swap on a downscale of
@@ -249,6 +262,7 @@ class FaceSwapEngine(FaceEngine):
         from insightface.utils import face_align
 
         from services.face.enhancer import ENHANCER_SIZE, _paste_back
+        from services.face.masking import match_color
 
         # Work at 512 when restoring (the enhancer's fixed input size), else
         # 256 — enough to keep the 128px swap result from being resampled up
@@ -280,7 +294,21 @@ class FaceSwapEngine(FaceEngine):
                 )
             face_out = restored
 
-        return _paste_back(frame, face_out, affine_matrix)
+        # Face-contour mask (falls back to the aligned square if unavailable —
+        # a mask failure must degrade the blend, never drop the frame).
+        face_mask = None
+        if self.masker is not None and bbox is not None:
+            dense = self.masker.landmarks_106(frame, bbox, landmarks)
+            if dense is not None:
+                face_mask = self.masker.build_mask(dense, affine_matrix, work_size)
+
+        # Colour transfer, inside the mask, so the generated face picks up the
+        # room's lighting instead of the reference photo's. Done after
+        # restoration because the enhancer also shifts tone slightly.
+        if self.color_match:
+            face_out = match_color(face_out, aligned, face_mask)
+
+        return _paste_back(frame, face_out, affine_matrix, face_mask)
 
 
 def _is_out_of_frame(

@@ -144,6 +144,11 @@ def test_fully_in_frame_face_is_swapped_normally():
     swap_model = FakeSwapModel()
     engine._swapper = swap_model
     engine._source_embedding = np.ones(512, dtype=np.float32)
+    # Colour matching is deliberately off here: this test covers the
+    # swap-and-composite path, and colour transfer would (correctly) rescale
+    # the fake's flat grey face toward the flat test frame, masking whether
+    # the composite happened at all. Colour transfer has its own tests.
+    engine.color_match = False
 
     frame = np.zeros((200, 200, 3), dtype=np.uint8)
     result = engine.process_frame(frame)
@@ -151,7 +156,7 @@ def test_fully_in_frame_face_is_swapped_normally():
     assert result.face_detected is True
     assert result.skip_reason is None
     assert swap_model.run_count == 1  # the swap model actually ran
-    # The fake returns a constant mid-gray face, so the composited frame must
+    # The fake returns a constant mid-grey face, so the composited frame must
     # differ from the all-black input where the face was pasted.
     assert result.output_image.max() > 0
 
