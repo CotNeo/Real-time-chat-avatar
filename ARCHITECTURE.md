@@ -38,7 +38,7 @@ the browser.
 ```mermaid
 flowchart LR
     subgraph apps/web
-        UI[Next.js UI]
+        UI["dev UI (HTML)\nNext.js not built"]
     end
     subgraph apps/bridge
         Bridge["Local device bridge\n(v4l2loopback + PipeWire writers)"]
@@ -53,7 +53,7 @@ flowchart LR
     end
     subgraph services/voice
         VoiceEngine["VoiceEngine\n(interface)"]
-        VoiceImpl["RVC / Seed-VC\n(chosen by benchmark)"]
+        VoiceImpl["PitchFormantVoiceEngine\n(neural VC deferred)"]
         VoiceEngine -.implemented by.-> VoiceImpl
     end
     subgraph services/webrtc
@@ -85,23 +85,35 @@ flowchart LR
 `services/voice/engine.py`) precisely so Mode A can be swapped for Mode B, or one
 voice backend for another, without touching the API or the bridge.
 
-## Video Pipeline
+## Video Pipeline (as built)
 
 ```mermaid
-flowchart LR
-    Cam["Webcam\n/dev/video0"] --> Capture["ThreadedCameraStream\n(latest-frame-wins)"]
-    Capture --> Detect{"Detect this frame?\n(every Nth frame)"}
-    Detect -- yes --> FullDetect["SCRFD/InsightFace\ndetection + landmarks"]
-    Detect -- no --> Track["Reuse tracked bbox\n+ landmarks"]
-    FullDetect --> ROI["Compute ROI, crop"]
-    Track --> ROI
-    ROI --> Infer["Identity-transfer\ninference (ONNX, CUDA)"]
-    Infer --> Resize["Resize back to ROI"]
-    Resize --> Blend["Blend into full frame"]
-    Blend --> Out["Output frame"]
-    Out --> VCam["v4l2loopback writer"]
-    Out --> Preview["WebRTC preview\n(browser)"]
+flowchart TD
+    Cam["Webcam /dev/video0"] --> Capture["ThreadedCameraStream\n(latest-frame-wins mailbox)"]
+    Capture --> Expose["FaceExposureController\n(meters the FACE, not the scene)"]
+    Expose --> Detect{"Detect this frame?\n(every Nth)"}
+    Detect -- yes --> SCRFD["SCRFD detection\n+ 5-point landmarks"]
+    Detect -- no --> Track["Reuse tracked bbox"]
+    SCRFD --> Edge{"Face inside\nthe frame?"}
+    Track --> Edge
+    Edge -- no --> Passthrough["Skip swap, pass frame through\n(alignment would sample outside)"]
+    Edge -- yes --> Align["Align once at working size"]
+    Align --> Swap["Swap model\nhyperswap 256 / inswapper 128"]
+    Swap --> Enh["Restoration\nGPEN-256 / GFPGAN-512"]
+    Enh --> Mask["Mask = 106-pt contour hull\n× occlusion mask"]
+    Mask --> Colour["LAB colour transfer\n(inside mask only)"]
+    Colour --> Paste["Region-limited paste-back"]
+    Paste --> Out["Output frame"]
 ```
+
+Two things this diagram encodes that cost real measurement to learn:
+
+* **One alignment, one paste-back.** Swap and restoration share them. Doing
+  each stage's own align/warp/mask/blend measured 203 ms vs 168 ms for
+  identical output.
+* **The mask is a product, not a union.** A pixel is painted only if it is
+  *both* inside the face contour *and* not occluded. A max/OR would paint over
+  a raised hand.
 
 Detection does not run on every frame (Section 6): a full detection pass runs
 every `face.detection_interval` frames (config), and the tracked box/landmarks
@@ -110,27 +122,44 @@ the Milestone 2 finding in `docs/PROGRESS.md`, where this exact webcam capped at
 ~15 FPS in low light — the pipeline's real ceiling is measured at session start
 and downstream stages target that measured rate, not an assumed 30.
 
-## Audio Pipeline
+## Audio Pipeline (as built)
 
 ```mermaid
-flowchart LR
-    Mic["Microphone\n(real hardware source)"] --> PCM["PCM frames"]
-    PCM --> Ring["Ring buffer"]
-    Ring --> VAD["Voice activity\ndetection"]
-    VAD --> Feat["Feature extraction\n+ F0 (pitch)"]
-    Feat --> Convert["Voice conversion\n(CUDA)"]
-    Convert --> OutBuf["Output buffer"]
-    OutBuf --> Sink["ai_avatar_mic_sink\n(PipeWire null-sink)"]
+flowchart TD
+    Mic["Microphone"] --> CB["PortAudio input callback"]
+    CB --> Ring["Bounded ring buffer\n(FIFO, drops OLDEST when full)"]
+    Ring --> Gate{"Peak above\nsilence gate?"}
+    Gate -- no --> Pass["Pass through unchanged"]
+    Gate -- yes --> STFT["STFT with carried context"]
+    STFT --> Formant["Warp magnitude spectrum\n(formant / vocal-tract size)"]
+    Formant --> Pitch["Phase vocoder stretch\n+ resample (pitch)"]
+    Pitch --> OutCB["PortAudio output callback"]
+    Pass --> OutCB
+    OutCB --> Sink["ai_avatar_mic_sink"]
     Sink -. monitor .-> Remap["module-remap-source"]
     Remap --> OSMic[["AI Avatar Microphone"]]
 ```
 
+Audio deliberately does **not** use the video pipeline's latest-frame-wins
+rule. A dropped video frame costs one stale image; dropped audio is an audible
+click. The ring stays ordered and bounded, and when it does overflow it
+discards the oldest block and counts it — keeping the oldest instead would let
+the speaker drift seconds behind the microphone.
+
+No AI runs inside the PortAudio callbacks: those are the device's own threads,
+and a slow callback underruns the stream.
+
 Verified independently of any voice model (`docs/PROGRESS.md`, Milestone 12):
 audio written to `ai_avatar_mic_sink` is genuinely recordable from the
 `AI Avatar Microphone` source — a 440 Hz test tone round-tripped end to end.
-The `Convert` stage is the only piece still to be filled in (Milestone 8/9).
+The conversion stage exists and is measured (Milestone 8), but is **not yet
+wired into this path** — connecting the engine to the live capture loop and on
+into the sink is the remaining work.
 
-## WebRTC Pipeline
+## WebRTC Pipeline — DESIGN ONLY, NOT BUILT
+
+The browser preview is served as MJPEG over HTTP today. The WebRTC path below
+was designed but never implemented (Milestone 15).
 
 ```mermaid
 flowchart LR
@@ -150,6 +179,9 @@ directly by the processing engine via `apps/bridge`, not by looping back
 through WebRTC.
 
 ## Sequence — Starting a Session
+
+Partly aspirational: the identity and session steps are real, the voice
+selection and virtual-device writer steps are not yet wired.
 
 ```mermaid
 sequenceDiagram

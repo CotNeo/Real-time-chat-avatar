@@ -1446,3 +1446,32 @@ in the expected direction is not a verified one.
 
 12 unit tests cover it, including a parametrised semitone-accuracy check that
 pins bugs 2 and 3 against regression.
+
+---
+
+## Project stopped — Milestone 9+ not started
+
+Status: **STOPPED** at the user's request.
+
+The goal this was ultimately measured against — upload a photo, appear as that
+person on a live stream convincingly — was not reached. See
+`docs/FINAL_ASSESSMENT.md` for the full account.
+
+The short version: the face pipeline improved by large measured margins
+(4.8 -> 17 FPS, a corrupted model replaced, restoration/masking/occlusion/
+colour matching added, a sharper 256px swap model adopted), but none of it
+closed the actual gap, because the gap is not in the face. A face-swap model
+replaces roughly 5-10% of the frame; hair, jawline, neck, shoulders, body and
+clothing are untouched camera footage, and for a male-to-female presentation
+those carry most of what a viewer reads.
+
+Closing that needs full head/body video synthesis, which runs at seconds per
+frame on any hardware available today — a research frontier, not a
+configuration or GPU question.
+
+Left in a working, resumable state: 73 tests passing, all models installed and
+registered, TensorRT engines cached, documentation current.
+
+Not done: Milestone 9 (voice benchmarking), 11 (virtual camera output), 15
+(WebRTC), 16 (Next.js UI), and wiring the voice engine into the live audio
+path.

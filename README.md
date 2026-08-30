@@ -1,275 +1,244 @@
 # Real-Time AI Avatar
 
-A local-first proof-of-concept: apply an identity from 1–5 reference photos onto
-your live webcam feed in real time, convert your live speech into a chosen
-target voice in real time, and expose the result to Linux as two standard
-devices — **AI Avatar Camera** and **AI Avatar Microphone** — so any application
-that can pick a camera/microphone can use them.
+A local-first, single-user research prototype: apply a face identity from
+reference photos to your live webcam feed, and convert your live speech toward
+a different vocal character — both in real time, on one Ubuntu machine with a
+6 GB GPU.
 
-This is a personal research/learning project for one user on one Ubuntu
-machine. No billing, no multi-tenancy, no Kubernetes — see `ARCHITECTURE.md`
-for why.
+Everything runs locally. No data leaves the machine.
 
-**Current status: system audit, CUDA verification, camera capture, live face
-detection, reference-identity upload/validation/embedding, and real-time face
-swap (Mode A) are all done and measured on real hardware, plus a minimal
-running FastAPI app with a browser preview. Voice conversion, the virtual
-camera/microphone output, and the polished web UI are not built yet.** See
-`docs/PROGRESS.md` for the exact, honest state of every milestone — don't
-trust marketing copy over that file.
+---
 
-Right now, with the server running (`python -m uvicorn services.api.main:app
---port 8100`), opening `http://localhost:8100` shows your live webcam feed
-with a face detection overlay by default; upload 1-5 reference photos and
-click "Start session" to switch the preview to live face swap instead. A
-low-light warning appears directly on the preview when the frame is too dark
-for reliable swap quality — a measured hardware limitation (see
-`docs/PROGRESS.md`, Milestone 5), not a bug. Good, even lighting on your face
-matters a lot for this model's output quality.
+## Honest summary of what this does and does not do
 
-## 1. Overview
+Read this before anything else, because the gap between the two lists is the
+single most important thing about this project.
 
-```
-Reference images ──┐
-                    ├─► Identity ──► Face pipeline ──► v4l2loopback ──► AI Avatar Camera
-Webcam ─────────────┘
+**It does:**
 
-Voice profile ──────┐
-                     ├─► Voice conversion ──► PipeWire ──► AI Avatar Microphone
-Microphone ──────────┘
-```
+- Replace the **face region** — brow line to chin, plus forehead and temples —
+  with an identity derived from 1-5 reference photos, at **17 FPS**.
+- Preserve your own motion completely: mouth shapes, blinks, gaze, head pose
+  and expression are all yours. Only identity is transferred.
+- Handle occlusion: a hand in front of your face keeps its real pixels instead
+  of having a generated face smeared over it.
+- Match the generated face to your room's lighting, and meter camera exposure
+  on your face rather than the whole scene.
+- Shift your voice's pitch and formants into a different vocal range at ~14x
+  real time, preserving your words, timing, pauses and intonation.
 
-Full diagrams (system context, video/audio/WebRTC pipelines, sequence
-diagrams) are in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+**It does not, and cannot with this approach:**
 
-## 2. Architecture diagram
+- **Change your hair.** The swap model reconstructs *your* hair, not the
+  reference's. It has no hair information in its identity encoding at all.
+- **Change your body, neck, jawline, shoulders or clothing.** Those are
+  untouched camera footage.
+- **Make you indistinguishable from a different person on a live stream.** The
+  face alone is convincing; everything framing it is still you, and that is
+  what a viewer reads.
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) — Mermaid diagrams render directly on
-GitHub.
+If your goal is to appear convincingly as a different person on camera, this
+architecture cannot get you there — see [Known limitations](#known-limitations)
+for what actually would, and why it isn't a tuning problem or a GPU problem.
 
-## 3. Hardware requirements
+---
 
-Developed and measured against:
+## Requirements
 
-| Component | This machine | Notes |
-|---|---|---|
-| GPU | NVIDIA RTX 2060, 6 GB VRAM | Effective budget ~5.5 GB once the desktop compositor's own usage is subtracted — see `docs/ENVIRONMENT_REPORT.md` |
-| CPU | 6-core/12-thread mid-range desktop CPU | i5-10400F here |
-| RAM | 16 GB | |
-| Disk | **Watch this closely.** ML deps + models can total 10–15 GB; this project needs real headroom, not just "some" |
-| Webcam | Any UVC webcam | See the low-light caveat in section 12 (Troubleshooting) — cheap sensors throttle FPS in dim rooms |
-| Mic | Any PipeWire/ALSA input | |
+| | |
+|---|---|
+| OS | Ubuntu 22.04 / 24.04 (built and measured on 24.04.4) |
+| GPU | NVIDIA, CUDA-capable. Developed on an RTX 2060 6 GB |
+| Driver | Recent NVIDIA driver with working `nvidia-smi` (built against 580.x) |
+| Disk | **~16 GB**: venv ~9.7 GB, models ~2.1 GB, TensorRT engine cache ~3 GB |
+| Audio | PipeWire (default on modern Ubuntu) |
+| Camera | Any UVC webcam. Lighting matters more than the camera — see below |
 
-A different GPU/VRAM size works too, but the config defaults (`configs/default.yaml`)
-and the "don't over-engineer for 12–24 GB VRAM" framing in `ARCHITECTURE.md`
-assume something in the 6 GB class.
+---
 
-## 4. Ubuntu requirements
-
-- Ubuntu 22.04 or 24.04 LTS (built against 24.04.4)
-- A recent NVIDIA driver with `nvidia-smi` working (built against driver 580.x,
-  CUDA 13.0 reported)
-- PipeWire (with the `pipewire-pulse` compatibility layer) for audio — the
-  default on modern Ubuntu
-- `sudo` access for one one-time step (installing `v4l2loopback-dkms` — see
-  section 8)
-
-## 5. Installation
+## Install
 
 ```bash
-git clone <this-repo-url> realtime-ai-avatar
+git clone <this-repo> realtime-ai-avatar
 cd realtime-ai-avatar
 
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 
-# Base + face pipeline (Milestones 1-6)
-pip install -r requirements/face.txt
+# Face stack. Use the script, NOT `pip install -r requirements/face.txt` —
+# insightface pulls plain onnxruntime and GUI opencv, which silently overwrite
+# the GPU/headless builds this project needs. The script installs around that.
+./scripts/setup/install_face_deps.sh
 
-# Add these once you reach the corresponding milestone — kept separate so
-# iterating on one doesn't force reinstalling the other:
-# pip install -r requirements/voice.txt
-# pip install -r requirements/webrtc.txt
-
-# Dev/test tooling
-pip install -r requirements/dev.txt
-
-cp .env.example .env
+# Audio + optional TensorRT acceleration (3-6x on the GPU models)
+pip install sounddevice soundfile torchaudio
+pip install tensorrt==10.16.1.11
 ```
 
-Frontend (once `apps/web` exists — Milestone 16, not yet built):
-```bash
-cd apps/web && npm install
-```
-
-## 6. CUDA validation
-
-Don't take CUDA availability on faith — run the actual verification script,
-which exercises the GPU (a real matmul, a real ONNX Runtime CUDA session) not
-just checks a boolean flag:
+Verify CUDA actually works — this exercises the GPU rather than checking a flag:
 
 ```bash
-source .venv/bin/activate
 python scripts/setup/verify_cuda.py
 ```
 
-Expected output on a working setup:
-```
-[ OK ] PyTorch CUDA
-       torch 2.13.0 (cu13.0)
-       GPU: NVIDIA GeForce RTX 2060  (compute capability 7.5)
-       VRAM: 5736 MiB
-[ OK ] ONNX Runtime CUDA
-       onnxruntime 1.29.0
-       providers available: [...]
-       session actually used: ['CUDAExecutionProvider', 'CPUExecutionProvider']
-RESULT: PyTorch CUDA = working, ONNX Runtime CUDA provider = working
+## Models
+
+Downloaded explicitly, never automatically at runtime. Each entry records its
+source, licence and checksum in `models/registry.yaml`.
+
+```bash
+python scripts/models.py list
+python scripts/models.py install face-detection   # SCRFD + ArcFace + landmarks
+python scripts/models.py install face-swap        # inswapper_128
+python scripts/models.py install face-enhancer    # GFPGAN v1.4
+python scripts/models.py install face-occluder    # DeepFaceLab XSeg
 ```
 
-If either check fails, the script prints numbered remediation steps naming the
-actual likely cause (Section 20's "descriptive errors, not Error 500" rule
-applies throughout this project) — follow those before opening an issue.
+The default swap model is `hyperswap_1c_256`, which is not in the installer —
+download it manually if you want the default configuration:
 
-## 7. Camera validation
+```bash
+curl -L -o models/face/models/inswapper/hyperswap_1c_256.onnx \
+  https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/hyperswap_1c_256.onnx
+```
+
+**Licence note:** several of these models come from community mirrors with
+unclear or non-commercial licences. `models/registry.yaml` states the position
+for each one. This project uses them locally and does not redistribute them.
+
+## Run
 
 ```bash
 source .venv/bin/activate
-python scripts/benchmark/benchmark_camera.py --device 0 --seconds 5
+python -m uvicorn services.api.main:app --host 127.0.0.1 --port 8100
 ```
 
-Writes `benchmarks/camera-results-auto-exposure.json` (or `-manual-exposure`
-if you pass `--manual-exposure <value>`) and a sample JPEG so you can visually
-confirm the camera is actually capturing your room, not silently failing.
-**Read the achieved FPS, not just the "requested" FPS** — see the Troubleshooting
-section below if it's well under 30.
+Open **http://localhost:8100**, upload 1-5 reference photos, then click *Start
+session*. The first run builds TensorRT engines and takes several minutes
+(XSeg alone takes ~7.5 minutes); they are cached in `.trt_cache/` afterwards.
 
-## 8. Model installation
+Port 8100 rather than 8000 because 8000 was already occupied on the development
+machine.
 
-Not yet applicable — no face/voice models are integrated yet (Milestones 3–9).
-Once they are, models install via:
-```bash
-python scripts/models.py install face-default
-python scripts/models.py install voice-female-01
-```
-against `models/registry.yaml`, never by auto-downloading from an arbitrary
-URL at runtime (Section 23). This section will be filled in with real commands
-once that script exists — check `docs/PROGRESS.md` for the current milestone.
+---
 
-## 9. Virtual camera setup
+## Configuration
 
-Needs root **once**, for the `v4l2loopback` kernel module. This machine's
-`sudo` requires an interactive password that an automated agent can't supply,
-so run this yourself in a real terminal:
+Everything lives in `configs/default.yaml`, with the measurement behind each
+default written next to it. The settings that matter most:
 
-```bash
-./scripts/setup/setup_virtual_camera.sh
-```
+```yaml
+face:
+  swap_model: hyperswap    # hyperswap = sharper (256px, 17 FPS)
+                           # inswapper = closer match to the reference (128px)
+  enhancement: fast        # off | fast | low | high  (high = sharpest, ~6 FPS)
+  mask: contour            # contour follows the real face outline
+  mask_expand: 1.3         # 1.3 includes the forehead, so brow expressions transfer
+  color_match: true        # match the generated face to the room's light
+  occlusion_mask: false    # redundant with hyperswap's own mask
 
-It installs `v4l2loopback-dkms` + `v4l-utils` if missing, loads the module as
-`/dev/video10` labeled "AI Avatar Camera", and is idempotent — safe to re-run.
-To remove it:
-```bash
-./scripts/setup/remove_virtual_camera.sh
+video:
+  face_metered_exposure: true   # expose for your face, not the bright window
+  target_face_brightness: 118
 ```
 
-## 10. Virtual microphone setup
+Measured presets on the RTX 2060 at 720p:
 
-Entirely user-space via PipeWire — **no root needed**, already verified
-end-to-end on this machine (see `docs/PROGRESS.md`, Milestone 12):
+| Configuration | ms/frame | FPS |
+|---|---|---|
+| hyperswap, own mask, GPEN-256 (**default**) | 58.8 | **17.0** |
+| hyperswap + XSeg + GPEN-256 | 66.0 | 15.2 |
+| inswapper + XSeg + GPEN-256 | 93.8 | 10.7 |
+| inswapper + XSeg + GFPGAN-512 | 160.1 | 6.2 |
 
-```bash
-./scripts/setup/setup_virtual_audio.sh
-```
+The webcam itself delivers ~15 FPS in typical indoor light, so the default is
+no longer GPU-limited.
 
-Creates a `ai_avatar_mic_sink` sink (where the AI voice engine will write) and
-remaps its monitor into a source named "AI Avatar Microphone" that any app's
-microphone dropdown can select. Verify:
-```bash
-wpctl status   # look for "AI Avatar Microphone" under Audio > Sources
-```
-Remove with:
-```bash
-./scripts/setup/remove_virtual_audio.sh
-```
-This only ever touches the two PipeWire modules it created — your real
-microphone and default devices are never modified.
+---
 
-## 11. Running the project
+## Getting the best results
 
-Not yet applicable end-to-end — the FastAPI service (Milestone 14) and the web
-UI (Milestone 16) don't exist yet. Today, run the individual verification
-scripts above. This section will list the real `uvicorn`/`npm run dev`
-commands once those milestones land — check `docs/PROGRESS.md` first.
+Lighting and framing matter more than any setting in this repo, and that is a
+measured claim, not advice:
 
-## 12. Web UI
+1. **Light your face from the front.** Sitting with a window behind you makes
+   the camera expose for the window. Face-metered exposure compensates, but it
+   buys brightness with exposure time, which costs frame rate.
+2. **Frame head-and-shoulders.** The further out the shot goes, the more
+   untouched body is visible.
+3. **Use frontal, well-lit reference photos** of a single person, consistent
+   with each other. The UI reports the apparent gender of your set and warns
+   if it is mixed — averaging faces across genders produces an identity that
+   resembles neither.
+4. **Sit fully inside the frame.** A face crossing the frame edge cannot be
+   aligned and the swap is skipped for that frame (the preview says so).
 
-Not built yet (Milestone 16). Planned layout is sketched in the original
-project brief; it will be a plain developer-oriented Next.js + Tailwind page,
-not a marketing site.
+---
 
-## 13. Troubleshooting
+## Known limitations
 
-**Camera FPS is way below what I requested.** Cheap UVC webcams often extend
-exposure time in low light, which caps deliverable FPS independent of the
-requested resolution/framerate — measured directly on this project's own
-Logitech C510: ~15 FPS in a dim room vs. ~30 FPS with more light, and forcing
-a short manual exposure without more light just trades FPS for an unusably
-dark image (see the full writeup in `docs/PROGRESS.md`, Milestone 2). Fix:
-add a lamp or face a window before assuming the software is at fault. You can
-also pass `--manual-exposure <value>` to the camera benchmark script to see
-this trade-off yourself.
+**Structural — no amount of tuning or GPU changes these:**
 
-**`CUDA initialization failed`.** Run `python scripts/setup/verify_cuda.py` —
-it distinguishes "no GPU visible" from "GPU visible but the CUDA execution
-provider silently fell back to CPU" and prints which shared library or driver
-layer to check for each case, rather than a bare exception.
+- Hair, body, neck, jawline, shoulders and clothing are never modified. The
+  swap model has no hair information in its identity encoding; feeding it a
+  blonde reference and reading back the output shows your own hair, verified
+  directly.
+- Consequently, presenting convincingly as a different person on camera is out
+  of reach. What a viewer reads is the whole frame, not the face oval.
+- Reaching that goal needs full head/body video synthesis — diffusion-class
+  models running at seconds per frame. **This is not a VRAM problem.** Even
+  high-end datacentre GPUs do not do photoreal full-body generation at video
+  frame rates today; it is a research frontier, not a purchase decision.
 
-**`sudo: a password is required` when running a setup script.** Expected on
-machines without a NOPASSWD rule — run the script yourself in an interactive
-terminal rather than through an automated tool; it will prompt normally.
+**Practical:**
 
-**PipeWire virtual mic doesn't show up in an app.** Some apps cache the device
-list at startup — restart the app after running `setup_virtual_audio.sh`.
+- Poor or backlit lighting degrades output substantially. Input quality bounds
+  output quality.
+- The 128/256px swap models mean a large on-screen face is upscaled, so some
+  softness is inherent.
+- Each frame is processed independently, so detail shimmers slightly between
+  frames. Temporal smoothing is not implemented.
+- Tongue-out and other extreme expressions render poorly — such faces are
+  barely represented in the model's training distribution.
+- The virtual camera (`v4l2loopback`) was never completed; it needs a one-time
+  `sudo` step. The virtual microphone works and is verified.
 
-## 14. Performance
+---
 
-Real, measured numbers only — see `docs/PROGRESS.md` for the running log and
-`benchmarks/*.json` for raw data. As of the latest milestone:
+## Project status
 
-- PyTorch CUDA and ONNX Runtime CUDA both confirmed working via real inference
-  (not just provider-list checks) on the RTX 2060.
-- Raw camera capture: ~15 FPS in this room's ambient light with auto-exposure
-  (dim but visible), ~29 FPS achievable with a forced short exposure (currently
-  unusably dark without more light). See the full investigation in
-  `docs/PROGRESS.md`, Milestone 2 — two real bugs were found and fixed
-  (a self-inflicted buffer-size throttle, and a wrong OpenCV exposure constant).
-- Face/voice inference latency: not yet measured — no model integrated.
+Milestones 0-8 are complete and measured. `docs/PROGRESS.md` is the honest
+record — every measurement, every wrong turn, and every bug found by testing
+rather than assuming. It is the most useful file here for anyone continuing
+the work.
 
-Face and voice model benchmarks will land in `benchmarks/face-results.json` /
-`benchmarks/voice-results.json` and `docs/FACE_MODEL_COMPARISON.md` /
-`docs/VOICE_MODEL_COMPARISON.md` once Milestones 6 and 9 are reached.
+| Milestone | Status |
+|---|---|
+| 0-2: environment, CUDA, camera | done |
+| 3-5: detection, identity, face swap | done |
+| 6: performance (TensorRT, model selection, exposure) | done |
+| 7-8: audio capture, voice conversion | done |
+| 9: voice benchmarking | not started |
+| 11: virtual camera | scripts written, needs one manual `sudo` step |
+| 12: virtual microphone | working, verified end to end |
+| 14-16: full API, WebRTC, Next.js UI | partial — a dev UI exists |
 
-## 15. Known limitations
-
-- Face swap/reenactment and voice conversion are not implemented yet — this is
-  scaffolding plus two verified infrastructure milestones (CUDA, camera) plus
-  one verified but unfed milestone (virtual microphone), not a finished product.
-- The virtual camera (`v4l2loopback`) requires a one-time manual root step this
-  agent cannot perform non-interactively.
-- Disk space on the development machine is tight (~27–35 GB free); large voice
-  model downloads later may require freeing more space first.
-- This webcam's real sustained frame rate depends heavily on ambient lighting;
-  the 30 FPS target assumes reasonable lighting, not a dark room.
+**Not built:** virtual camera output, WebRTC, the Next.js frontend, and
+wiring the voice engine into the live audio path.
 
 ## Privacy
 
-`LOCAL_ONLY=true` by default (`.env.example`) — no reference image, audio, or
-video is sent to any external service unless you deliberately change this and
-understand the trade-off (Section 21 of the original project brief). Reference
-images are processed into an embedding and are not retained beyond a session
-by design (`shared/schemas/identity.py`'s `IdentitySession` never stores the
-source images). This project does not implement, and will not implement, any
-mechanism to bypass biometric authentication, liveness checks, KYC, or platform
-trust/access controls — it exists for consensual avatar/creative
-experimentation on your own likeness or likenesses you have permission to use.
+- `LOCAL_ONLY=true` by default. Nothing is sent anywhere.
+- **Reference photos are never written to disk.** They are decoded in memory,
+  reduced to an embedding, and discarded. Thumbnails in the UI are rendered by
+  your browser from your own local files.
+- Camera exposure is restored to automatic on shutdown, since UVC exposure is a
+  device setting that outlives the process.
+
+This project does not implement, and must not be used for, bypassing identity
+verification, biometric authentication, liveness checks, KYC or platform trust
+systems. It is for consensual avatar experimentation. The reference faces used
+throughout development were synthetic — generated people who do not exist —
+which is the intended pattern: using a real person's likeness to represent
+yourself to others without their consent is out of scope and not supported.
